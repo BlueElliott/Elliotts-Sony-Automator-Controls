@@ -380,47 +380,57 @@ if static_dir.exists():
 
 # Styling functions
 def _get_base_styles() -> str:
-    """Return base CSS styles matching Elliott's house style."""
-    return """
+    """Return base CSS styles matching Elliott's Singular Control exactly."""
+    # Modern dark theme - matched to desktop GUI colors
+    bg = "#1a1a1a"
+    fg = "#ffffff"
+    card_bg = "#2d2d2d"
+    border = "#3d3d3d"
+    accent = "#00bcd4"
+    accent_hover = "#0097a7"
+    text_muted = "#888888"
+    input_bg = "#252525"
+
+    return f"""
     <style>
-        @font-face {
-            font-family: 'ITV Reem';
-            src: url('/static/ITV Reem-Regular.ttf') format('truetype');
-            font-weight: 400;
-            font-style: normal;
-        }
-        @font-face {
-            font-family: 'ITV Reem';
-            src: url('/static/ITV Reem-Medium.ttf') format('truetype');
-            font-weight: 500;
-            font-style: normal;
-        }
-        @font-face {
-            font-family: 'ITV Reem';
-            src: url('/static/ITV Reem-Bold.ttf') format('truetype');
-            font-weight: 700;
-            font-style: normal;
-        }
-        @font-face {
-            font-family: 'ITV Reem';
+        @font-face {{
+            font-family: 'ITVReem';
             src: url('/static/ITV Reem-Light.ttf') format('truetype');
             font-weight: 300;
             font-style: normal;
-        }
+        }}
+        @font-face {{
+            font-family: 'ITVReem';
+            src: url('/static/ITV Reem-Regular.ttf') format('truetype');
+            font-weight: 400;
+            font-style: normal;
+        }}
+        @font-face {{
+            font-family: 'ITVReem';
+            src: url('/static/ITV Reem-Medium.ttf') format('truetype');
+            font-weight: 500;
+            font-style: normal;
+        }}
+        @font-face {{
+            font-family: 'ITVReem';
+            src: url('/static/ITV Reem-Bold.ttf') format('truetype');
+            font-weight: 700;
+            font-style: normal;
+        }}
 
-        * {
-            margin: 0;
-            padding: 0;
+        * {{
             box-sizing: border-box;
-        }
+        }}
 
-        body {
-            font-family: 'ITV Reem', 'Segoe UI', -apple-system, system-ui, sans-serif;
-            background: #1a1a1a;
-            color: #ffffff;
+        body {{
+            font-family: 'ITVReem', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            background: {bg};
+            color: {fg};
+            padding: 20px;
             line-height: 1.6;
-            font-size: 14px;
-        }
+        }}
 
         .container {
             max-width: 1200px;
@@ -433,74 +443,96 @@ def _get_base_styles() -> str:
             margin-bottom: 20px;
         }
 
-        h1 {
-            font-size: 32px;
-            color: #00bcd4;
-        }
-
-        h2 {
-            font-size: 24px;
-            color: #00bcd4;
-        }
-
-        h3 {
-            font-size: 18px;
-            color: #ffffff;
-        }
-
-        /* Navigation */
-        nav {
-            background: #252525;
-            border-bottom: 2px solid #00bcd4;
-            margin-bottom: 30px;
-        }
-
-        nav .container {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 15px 20px;
-        }
-
-        nav .logo {
-            font-size: 20px;
+        h1 {{
+            font-size: 28px;
             font-weight: 700;
-            color: #00bcd4;
-            text-decoration: none;
-        }
+            margin: 20px 0 8px 0;
+            padding-top: 50px;
+            color: {fg};
+        }}
 
-        nav .nav-links {
+        h1 + p {{
+            color: {text_muted};
+            margin-bottom: 24px;
+        }}
+
+        h2 {{
+            font-size: 20px;
+            font-weight: 600;
+            margin: 24px 0 12px 0;
+            color: {fg};
+        }}
+
+        h3 {{
+            margin-top: 24px;
+            margin-bottom: 8px;
+            font-size: 16px;
+            color: {fg};
+        }}
+
+        h3 small {{
+            color: {text_muted};
+            font-weight: 400;
+        }}
+
+        /* Fixed Navigation - Elliott's style */
+        .nav {{
+            position: fixed;
+            top: 16px;
+            left: 16px;
             display: flex;
-            gap: 10px;
-            list-style: none;
-        }
+            gap: 4px;
+            z-index: 1000;
+            background: {card_bg};
+            padding: 6px;
+            border-radius: 10px;
+            border: 1px solid {accent}40;
+            box-shadow: 0 2px 12px rgba(0, 188, 212, 0.15);
+        }}
 
-        nav a {
-            color: #ffffff;
+        .nav a {{
+            color: {text_muted};
             text-decoration: none;
-            padding: 10px 20px;
+            padding: 8px 14px;
             border-radius: 6px;
-            transition: all 0.2s ease;
-        }
+            font-size: 13px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }}
 
-        nav a:hover {
-            background: #2d2d2d;
-            color: #00bcd4;
-        }
+        .nav a:hover {{
+            background: {accent}20;
+            color: {accent};
+        }}
 
-        nav a.active {
-            background: #00bcd4;
-            color: #ffffff;
-        }
+        .nav a.active {{
+            background: {accent};
+            color: #fff;
+        }}
 
-        /* Sections */
-        .section {
-            background: #252525;
-            border: 1px solid #3d3d3d;
-            border-radius: 8px;
-            padding: 25px;
-            margin-bottom: 25px;
-        }
+        /* Sections / Fieldsets - Elliott's style */
+        fieldset {{
+            margin-bottom: 20px;
+            padding: 20px 24px;
+            background: {card_bg};
+            border: 1px solid {border};
+            border-radius: 12px;
+        }}
+
+        legend {{
+            font-weight: 600;
+            padding: 0 12px;
+            font-size: 14px;
+            color: {text_muted};
+        }}
+
+        .section {{
+            background: {card_bg};
+            border: 1px solid {border};
+            border-radius: 12px;
+            padding: 20px 24px;
+            margin-bottom: 20px;
+        }}
 
         /* Status indicators */
         .status-grid {
@@ -567,120 +599,145 @@ def _get_base_styles() -> str:
             margin-left: 24px;
         }
 
-        /* Buttons */
-        button, .btn {
-            font-family: 'ITV Reem', sans-serif;
-            font-size: 14px;
-            font-weight: 500;
-            padding: 10px 20px;
-            border: none;
-            border-radius: 6px;
+        /* Buttons - Elliott's style with transform */
+        button {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            margin-top: 12px;
+            margin-right: 8px;
+            padding: 0 20px;
+            height: 40px;
             cursor: pointer;
-            transition: all 0.2s ease;
-            text-decoration: none;
-            display: inline-block;
-        }
-
-        button.primary, .btn.primary {
-            background: #00bcd4;
-            color: #ffffff;
-        }
-
-        button.primary:hover, .btn.primary:hover {
-            background: #0097a7;
-        }
-
-        button.secondary, .btn.secondary {
-            background: #3d3d3d;
-            color: #ffffff;
-        }
-
-        button.secondary:hover, .btn.secondary:hover {
-            background: #4d4d4d;
-        }
-
-        button.danger, .btn.danger {
-            background: #ef4444;
-            color: #ffffff;
-        }
-
-        button.danger:hover, .btn.danger:hover {
-            background: #dc2626;
-        }
-
-        button.success, .btn.success {
-            background: #22c55e;
-            color: #ffffff;
-        }
-
-        button.success:hover, .btn.success:hover {
-            background: #16a34a;
-        }
-
-        button:disabled {
-            background: #3d3d3d;
-            color: #666666;
-            cursor: not-allowed;
-        }
-
-        /* Forms */
-        .form-group {
-            margin-bottom: 20px;
-        }
-
-        label {
-            display: block;
-            margin-bottom: 8px;
-            color: #ffffff;
-            font-weight: 500;
-        }
-
-        input, textarea, select {
-            font-family: 'ITV Reem', sans-serif;
-            width: 100%;
-            padding: 10px 12px;
-            background: #2d2d2d;
-            border: 1px solid #3d3d3d;
-            border-radius: 6px;
-            color: #ffffff;
+            background: {accent};
+            color: #fff;
+            border: none;
+            border-radius: 8px;
             font-size: 14px;
-            transition: all 0.2s ease;
-        }
-
-        input:focus, textarea:focus, select:focus {
-            outline: none;
-            border-color: #00bcd4;
-            box-shadow: 0 0 0 3px rgba(0, 188, 212, 0.2);
-        }
-
-        input::placeholder, textarea::placeholder {
-            color: #666666;
-        }
-
-        /* Tables */
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 20px;
-        }
-
-        th {
-            background: #2d2d2d;
-            color: #00bcd4;
             font-weight: 500;
+            transition: all 0.2s;
+        }}
+
+        button:hover {{
+            background: {accent_hover};
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px {accent}40;
+        }}
+
+        button:active {{
+            transform: translateY(0);
+        }}
+
+        button.secondary {{
+            background: {border};
+            color: {fg};
+        }}
+
+        button.secondary:hover {{
+            background: #4a4a4a;
+            box-shadow: none;
+            transform: none;
+        }}
+
+        button.danger {{
+            background: #ef4444;
+        }}
+
+        button.danger:hover {{
+            background: #dc2626;
+        }}
+
+        button.warning {{
+            background: #f59e0b;
+            color: #000;
+        }}
+
+        button.warning:hover {{
+            background: #d97706;
+        }}
+
+        button.success {{
+            background: #22c55e;
+        }}
+
+        button.success:hover {{
+            background: #16a34a;
+        }}
+
+        .btn-row {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 16px;
+        }}
+
+        .btn-row button,
+        .btn-row .status {{
+            margin: 0 !important;
+            margin-top: 0 !important;
+            margin-right: 0 !important;
+        }}
+
+        /* Forms - Elliott's style */
+        label {{
+            display: block;
+            margin-top: 12px;
+            font-size: 14px;
+            color: {text_muted};
+        }}
+
+        input,
+        select {{
+            width: 100%;
+            padding: 10px 14px;
+            margin-top: 6px;
+            background: {input_bg};
+            color: {fg};
+            border: 1px solid {border};
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }}
+
+        input:focus,
+        select:focus {{
+            outline: none;
+            border-color: {accent};
+            box-shadow: 0 0 0 3px {accent}33;
+        }}
+
+        /* Tables - Elliott's style */
+        table {{
+            border-collapse: collapse;
+            width: 100%;
+            margin-top: 12px;
+            border-radius: 8px;
+            overflow: hidden;
+        }}
+
+        th,
+        td {{
+            border: 1px solid {border};
+            padding: 10px 14px;
+            font-size: 13px;
             text-align: left;
-            padding: 12px;
-            border-bottom: 2px solid #00bcd4;
-        }
+        }}
 
-        td {
-            padding: 12px;
-            border-bottom: 1px solid #3d3d3d;
-        }
+        th {{
+            background: {accent};
+            color: #fff;
+            font-weight: 600;
+        }}
 
-        tr:hover {
-            background: #2d2d2d;
-        }
+        tr:nth-child(even) td {{
+            background: {input_bg};
+        }}
+
+        tr:hover td {{
+            background: {border};
+        }}
 
         /* Lists */
         .item-list {
@@ -793,7 +850,7 @@ def _get_base_styles() -> str:
 
 
 def _get_nav_html(active_page: str = "home") -> str:
-    """Return navigation HTML."""
+    """Return navigation HTML - fixed top-left style matching Elliott's."""
     pages = [
         ("home", "Home", "/"),
         ("tcp", "TCP Commands", "/tcp-commands"),
@@ -803,19 +860,10 @@ def _get_nav_html(active_page: str = "home") -> str:
 
     nav_items = ""
     for page_id, title, url in pages:
-        active_class = "active" if page_id == active_page else ""
-        nav_items += f'<a href="{url}" class="{active_class}">{title}</a>\n'
+        active_class = ' class="active"' if page_id == active_page else ""
+        nav_items += f'<a href="{url}"{active_class}>{title}</a>'
 
-    return f"""
-    <nav>
-        <div class="container">
-            <a href="/" class="logo">Sony Automator Controls</a>
-            <div class="nav-links">
-                {nav_items}
-            </div>
-        </div>
-    </nav>
-    """
+    return f'<div class="nav">{nav_items}</div>'
 
 
 def _get_base_html(title: str, content: str, active_page: str = "home") -> str:
@@ -826,14 +874,14 @@ def _get_base_html(title: str, content: str, active_page: str = "home") -> str:
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>{title} - Sony Automator Controls</title>
+        <title>{title} - Elliott's Sony Automator Controls</title>
         {_get_base_styles()}
     </head>
     <body>
         {_get_nav_html(active_page)}
-        <div class="container">
-            {content}
-        </div>
+        <h1>Elliott's Sony Automator Controls</h1>
+        <p>{title}</p>
+        {content}
     </body>
     </html>
     """

@@ -1,18 +1,16 @@
-"""GUI Launcher for Sony Automator Controls using Tkinter."""
+"""GUI Launcher for Sony Automator Controls with system tray support."""
 
-import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
+import time
 import threading
 import webbrowser
-import subprocess
-import sys
-import time
 import logging
-from pathlib import Path
-
+import tkinter as tk
+from tkinter import scrolledtext, messagebox
+import socket
 import pystray
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
 import uvicorn
+from pathlib import Path
 
 from sony_automator_controls import core
 
@@ -23,23 +21,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Colors matching Elliott's house style
-COLORS = {
-    "bg_dark": "#1a1a1a",
-    "bg_medium": "#252525",
-    "bg_card": "#2d2d2d",
-    "accent_cyan": "#00bcd4",
-    "accent_cyan_dark": "#0097a7",
-    "text_light": "#ffffff",
-    "text_gray": "#888888",
-    "button_blue": "#2196f3",
-    "button_green": "#4caf50",
-    "button_red": "#ff5252",
-    "button_orange": "#e67e22",
-    "button_red_dark": "#c0392b",
-    "button_gray": "#3d3d3d",
-    "border": "#3d3d3d",
-}
+
+def get_local_ip() -> str:
+    """Get the local network IP address."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
 
 
 class SonyAutomatorGUI:
@@ -48,15 +38,33 @@ class SonyAutomatorGUI:
     def __init__(self):
         """Initialize the GUI application."""
         self.root = tk.Tk()
-        self.root.title("Sony Automator Controls")
-        self.root.geometry("800x700")
+        self.root.title(f"Elliott's Sony Automator Controls - v{core.__version__}")
+        self.root.geometry("750x650")
         self.root.resizable(False, False)
-        self.root.configure(bg=COLORS["bg_dark"])
+
+        # Modern dark theme colors matching Elliott's Singular Control
+        self.bg_dark = "#1a1a1a"
+        self.bg_medium = "#252525"
+        self.bg_card = "#2d2d2d"
+        self.accent_teal = "#00bcd4"
+        self.accent_teal_dark = "#0097a7"
+        self.text_light = "#ffffff"
+        self.text_gray = "#888888"
+        self.button_blue = "#2196f3"
+        self.button_green = "#4caf50"
+        self.button_red = "#ff5252"
+        self.button_gray = "#3d3d3d"
+        self.button_orange = "#e67e22"
+        self.button_red_dark = "#c0392b"
+
+        self.root.configure(bg=self.bg_dark)
+
+        # Load fonts
+        self._load_fonts()
 
         # Server state
         self.server_thread = None
         self.server_running = False
-        self.server_port = 3114
         self.console_window = None
         self.tray_icon = None
 
@@ -64,213 +72,350 @@ class SonyAutomatorGUI:
         self.config = core.load_config()
         self.server_port = self.config.get("web_port", 3114)
 
-        # Setup GUI
-        self._setup_gui()
+        # Runtime tracking
+        self.start_time = time.time()
+        self.pulse_angle = 0
 
-        # Start server
-        self.start_server()
+        # Pulse rendering
+        self.pulse_size = 40
+        self.pulse_scale = 4
+        self.pulse_image = None
 
-        # Protocol for window close
+        # Setup UI
+        self.setup_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-    def _setup_gui(self):
-        """Setup the GUI components."""
-        # Header
-        header_frame = tk.Frame(self.root, bg=COLORS["bg_medium"], height=80)
-        header_frame.pack(fill=tk.X, padx=0, pady=0)
-        header_frame.pack_propagate(False)
+    def _load_fonts(self):
+        """Load ITV Reem fonts for the GUI."""
+        try:
+            static_path = Path(__file__).parent.parent / "static"
+            regular_path = static_path / "ITV Reem-Regular.ttf"
 
-        title_label = tk.Label(
-            header_frame,
-            text="Sony Automator Controls",
-            font=("Segoe UI", 24, "bold"),
-            bg=COLORS["bg_medium"],
-            fg=COLORS["accent_cyan"]
+            if regular_path.exists():
+                self.font_regular = ("ITV Reem", 10)
+                self.font_regular_11 = ("ITV Reem", 11)
+                self.font_regular_24 = ("ITV Reem", 24)
+                self.font_bold = ("ITV Reem", 10, "bold")
+                self.font_bold_11 = ("ITV Reem", 11, "bold")
+                self.font_bold_24 = ("ITV Reem", 24, "bold")
+                self.font_bold_32 = ("ITV Reem", 32, "bold")
+            else:
+                self.font_regular = ("Segoe UI", 10)
+                self.font_regular_11 = ("Segoe UI", 11)
+                self.font_regular_24 = ("Segoe UI", 24)
+                self.font_bold = ("Segoe UI", 10, "bold")
+                self.font_bold_11 = ("Segoe UI", 11, "bold")
+                self.font_bold_24 = ("Segoe UI", 24, "bold")
+                self.font_bold_32 = ("Segoe UI", 32, "bold")
+        except Exception:
+            self.font_regular = ("Segoe UI", 10)
+            self.font_regular_11 = ("Segoe UI", 11)
+            self.font_regular_24 = ("Segoe UI", 24)
+            self.font_bold = ("Segoe UI", 10, "bold")
+            self.font_bold_11 = ("Segoe UI", 11, "bold")
+            self.font_bold_24 = ("Segoe UI", 24, "bold")
+            self.font_bold_32 = ("Segoe UI", 32, "bold")
+
+    def _draw_rounded_rect(self, canvas, x1, y1, x2, y2, radius, fill):
+        """Draw a rounded rectangle on canvas with smooth edges."""
+        canvas.create_oval(x1, y1, x1 + radius*2, y1 + radius*2, fill=fill, outline=fill)
+        canvas.create_oval(x2 - radius*2, y1, x2, y1 + radius*2, fill=fill, outline=fill)
+        canvas.create_oval(x1, y2 - radius*2, x1 + radius*2, y2, fill=fill, outline=fill)
+        canvas.create_oval(x2 - radius*2, y2 - radius*2, x2, y2, fill=fill, outline=fill)
+        canvas.create_rectangle(x1 + radius, y1, x2 - radius, y2, fill=fill, outline=fill)
+        canvas.create_rectangle(x1, y1 + radius, x2, y2 - radius, fill=fill, outline=fill)
+
+    def _draw_smooth_rounded_rect(self, canvas, x1, y1, x2, y2, radius, fill):
+        """Draw a smooth rounded rectangle using arcs and rectangles."""
+        canvas.create_rectangle(x1 + radius, y1, x2 - radius, y2, fill=fill, outline=fill)
+        canvas.create_rectangle(x1, y1 + radius, x2, y2 - radius, fill=fill, outline=fill)
+        canvas.create_oval(x1, y1, x1 + radius*2, y1 + radius*2, fill=fill, outline=fill)
+        canvas.create_oval(x2 - radius*2, y1, x2, y1 + radius*2, fill=fill, outline=fill)
+        canvas.create_oval(x1, y2 - radius*2, x1 + radius*2, y2, fill=fill, outline=fill)
+        canvas.create_oval(x2 - radius*2, y2 - radius*2, x2, y2, fill=fill, outline=fill)
+
+    def create_rounded_button(self, parent, text, command, bg_color, width=180, height=50, state=tk.NORMAL):
+        """Create a modern rounded button using canvas with smooth edges."""
+        canvas = tk.Canvas(
+            parent,
+            width=width,
+            height=height,
+            bg=self.bg_dark,
+            highlightthickness=0,
+            bd=0
         )
-        title_label.pack(pady=15)
+
+        # Draw rounded rectangle
+        radius = 10
+        self._draw_smooth_rounded_rect(canvas, 0, 0, width, height, radius, bg_color)
+
+        # Add text
+        canvas.create_text(
+            width/2, height/2,
+            text=text,
+            fill=self.text_light if state == tk.NORMAL else self.text_gray,
+            font=self.font_bold_11
+        )
+
+        # Bind click event
+        if state == tk.NORMAL:
+            canvas.bind("<Button-1>", lambda e: command())
+            canvas.bind("<Enter>", lambda e: canvas.configure(cursor="hand2"))
+            canvas.bind("<Leave>", lambda e: canvas.configure(cursor=""))
+
+        canvas.button_state = state
+        canvas.bg_color = bg_color
+        return canvas
+
+    def setup_ui(self):
+        """Setup the main UI with modern dark theme."""
+        # Top section with branding
+        top_frame = tk.Frame(self.root, bg=self.bg_dark, height=70)
+        top_frame.pack(fill=tk.X, padx=40, pady=(30, 0))
+        top_frame.pack_propagate(False)
+
+        # Branding text - centered with version
+        brand_frame = tk.Frame(top_frame, bg=self.bg_dark)
+        brand_frame.pack(expand=True)
+
+        brand_label = tk.Label(
+            brand_frame,
+            text="Elliott's Sony Automator Controls",
+            font=self.font_bold_24,
+            bg=self.bg_dark,
+            fg=self.text_light
+        )
+        brand_label.pack()
 
         version_label = tk.Label(
-            header_frame,
-            text=f"v{core.__version__}",
-            font=("Segoe UI", 10),
-            bg=COLORS["bg_medium"],
-            fg=COLORS["text_gray"]
+            brand_frame,
+            text=f"Version {core.__version__}",
+            font=self.font_regular,
+            bg=self.bg_dark,
+            fg=self.text_gray
         )
         version_label.pack()
 
         # Main content area
-        content_frame = tk.Frame(self.root, bg=COLORS["bg_dark"])
-        content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        content_frame = tk.Frame(self.root, bg=self.bg_dark)
+        content_frame.pack(fill=tk.BOTH, expand=True, padx=40, pady=(20, 30))
 
-        # Status section
-        self._create_status_section(content_frame)
-
-        # Control buttons section
-        self._create_buttons_section(content_frame)
-
-        # Info section
-        self._create_info_section(content_frame)
-
-    def _create_status_section(self, parent):
-        """Create status indicator section."""
-        status_frame = tk.Frame(parent, bg=COLORS["bg_card"], relief=tk.FLAT, bd=1)
-        status_frame.pack(fill=tk.X, pady=(0, 20))
-
-        # Section title
-        title_label = tk.Label(
-            status_frame,
-            text="Server Status",
-            font=("Segoe UI", 14, "bold"),
-            bg=COLORS["bg_card"],
-            fg=COLORS["text_light"]
-        )
-        title_label.pack(pady=(15, 10))
-
-        # Status indicator
-        indicator_frame = tk.Frame(status_frame, bg=COLORS["bg_card"])
-        indicator_frame.pack(pady=10)
-
-        self.status_canvas = tk.Canvas(
-            indicator_frame,
-            width=20,
-            height=20,
-            bg=COLORS["bg_card"],
+        # Port card with rounded corners using Canvas
+        port_card_canvas = tk.Canvas(
+            content_frame,
+            width=670,
+            height=140,
+            bg=self.bg_dark,
             highlightthickness=0
         )
-        self.status_canvas.pack(side=tk.LEFT, padx=(0, 10))
+        port_card_canvas.pack(pady=(0, 20))
 
+        # Draw rounded rectangle for card background
+        self._draw_rounded_rect(port_card_canvas, 0, 0, 670, 140, 20, self.bg_card)
+
+        # SERVER PORT label
+        port_card_canvas.create_text(335, 25, text="SERVER PORT", fill=self.text_gray, font=self.font_bold)
+
+        # Port number with teal background (rounded)
+        self._draw_rounded_rect(port_card_canvas, 235, 40, 435, 95, 12, self.accent_teal)
+        self.port_text_id = port_card_canvas.create_text(335, 67, text=str(self.server_port), fill=self.text_light, font=self.font_bold_32)
+
+        # Web interface URL label
+        port_card_canvas.create_text(335, 115, text=f"http://127.0.0.1:{self.server_port}/", fill=self.text_gray, font=("ITV Reem", 9))
+
+        self.port_card_canvas = port_card_canvas
+
+        # Network IP display
+        network_ip = get_local_ip()
+        self.network_url = f"http://{network_ip}:{self.server_port}"
+
+        network_label = tk.Label(
+            content_frame,
+            text=f"Network: {self.network_url}",
+            font=("ITV Reem", 10),
+            bg=self.bg_dark,
+            fg=self.accent_teal,
+            cursor="hand2"
+        )
+        network_label.pack(pady=(0, 10))
+
+        # Status frame with pulse indicator and runtime
+        status_frame = tk.Frame(content_frame, bg=self.bg_dark)
+        status_frame.pack(pady=(0, 5))
+
+        # Pulse indicator using PIL for anti-aliased smooth graphics
+        self.pulse_label = tk.Label(status_frame, bg=self.bg_dark, bd=0, highlightthickness=0)
+        self.pulse_label.pack(side=tk.LEFT, padx=(0, 8))
+
+        # Status message
         self.status_label = tk.Label(
-            indicator_frame,
-            text="Starting...",
-            font=("Segoe UI", 12),
-            bg=COLORS["bg_card"],
-            fg=COLORS["text_light"]
+            status_frame,
+            text="Starting server...",
+            font=self.font_regular_11,
+            bg=self.bg_dark,
+            fg=self.text_gray
         )
         self.status_label.pack(side=tk.LEFT)
 
-        # Draw initial status dot
-        self._draw_status_dot("yellow")
-
-        # Status details
-        self.details_label = tk.Label(
+        # Runtime label
+        self.runtime_label = tk.Label(
             status_frame,
-            text=f"Port: {self.server_port}",
-            font=("Segoe UI", 10),
-            bg=COLORS["bg_card"],
-            fg=COLORS["text_gray"]
+            text="",
+            font=self.font_regular,
+            bg=self.bg_dark,
+            fg=self.text_gray
         )
-        self.details_label.pack(pady=(0, 15))
+        self.runtime_label.pack(side=tk.LEFT, padx=(15, 0))
 
-        # Start status update loop
-        self._update_status()
+        # Action buttons (2 per row, full-width quit)
+        btn_container = tk.Frame(content_frame, bg=self.bg_dark)
+        btn_container.pack(pady=(20, 0))
 
-    def _draw_status_dot(self, color):
-        """Draw status indicator dot."""
-        self.status_canvas.delete("all")
-        color_map = {
-            "green": COLORS["button_green"],
-            "red": COLORS["button_red"],
-            "yellow": COLORS["button_orange"]
-        }
-        fill_color = color_map.get(color, COLORS["text_gray"])
+        # Row 1
+        row1 = tk.Frame(btn_container, bg=self.bg_dark)
+        row1.pack(pady=6)
 
-        self.status_canvas.create_oval(2, 2, 18, 18, fill=fill_color, outline="")
-
-    def _create_buttons_section(self, parent):
-        """Create control buttons section."""
-        buttons_frame = tk.Frame(parent, bg=COLORS["bg_dark"])
-        buttons_frame.pack(fill=tk.BOTH, expand=True)
-
-        # Open Web GUI button
-        web_btn = self._create_button(
-            buttons_frame,
-            "Open Web Interface",
-            COLORS["accent_cyan"],
-            COLORS["accent_cyan_dark"],
-            self.open_web_gui
+        self.launch_btn = self.create_rounded_button(
+            row1, "Open Web GUI", self.launch_browser,
+            self.button_blue, width=290, height=50
         )
-        web_btn.pack(fill=tk.X, pady=5)
+        self.launch_btn.pack(side=tk.LEFT, padx=6)
 
-        # Open Console button
-        console_btn = self._create_button(
-            buttons_frame,
-            "Open Console Log",
-            COLORS["button_gray"],
-            COLORS["bg_card"],
-            self.open_console
+        self.console_toggle_btn = self.create_rounded_button(
+            row1, "Open Console", self.toggle_console,
+            self.button_gray, width=290, height=50
         )
-        console_btn.pack(fill=tk.X, pady=5)
+        self.console_toggle_btn.pack(side=tk.LEFT, padx=6)
 
-        # Restart Server button
-        restart_btn = self._create_button(
-            buttons_frame,
-            "Restart Server",
-            COLORS["button_orange"],
-            COLORS["button_red_dark"],
-            self.restart_server
+        # Row 2
+        row2 = tk.Frame(btn_container, bg=self.bg_dark)
+        row2.pack(pady=6)
+
+        self.restart_btn = self.create_rounded_button(
+            row2, "Restart Server", self.restart_application,
+            self.button_orange, width=290, height=50
         )
-        restart_btn.pack(fill=tk.X, pady=5)
+        self.restart_btn.pack(side=tk.LEFT, padx=6)
 
-        # Hide to Tray button
-        tray_btn = self._create_button(
-            buttons_frame,
-            "Hide to System Tray",
-            COLORS["button_gray"],
-            COLORS["bg_card"],
-            self.hide_to_tray
+        self.hide_btn = self.create_rounded_button(
+            row2, "Hide to Tray", self.minimize_to_tray,
+            self.button_gray, width=290, height=50
         )
-        tray_btn.pack(fill=tk.X, pady=5)
+        self.hide_btn.pack(side=tk.LEFT, padx=6)
 
-        # Separator
-        separator = tk.Frame(buttons_frame, bg=COLORS["border"], height=2)
-        separator.pack(fill=tk.X, pady=15)
+        # Row 3 (Quit centered or full width)
+        row3 = tk.Frame(btn_container, bg=self.bg_dark)
+        row3.pack(pady=6)
 
-        # Quit button
-        quit_btn = self._create_button(
-            buttons_frame,
-            "Quit Application",
-            COLORS["button_red_dark"],
-            COLORS["button_red"],
-            self.quit_application
+        self.quit_btn = self.create_rounded_button(
+            row3, "Quit Server", self.on_closing,
+            self.button_red_dark, width=596, height=50
         )
-        quit_btn.pack(fill=tk.X, pady=5)
+        self.quit_btn.pack()
 
-    def _create_button(self, parent, text, bg_color, hover_color, command):
-        """Create a styled button."""
-        btn = tk.Button(
-            parent,
-            text=text,
-            font=("Segoe UI", 11, "bold"),
-            bg=bg_color,
-            fg=COLORS["text_light"],
-            activebackground=hover_color,
-            activeforeground=COLORS["text_light"],
-            relief=tk.FLAT,
-            cursor="hand2",
-            command=command,
-            padx=20,
-            pady=12
+        # Start pulse animation and runtime update
+        self._update_pulse()
+        self._update_runtime()
+
+        # Auto-start server on launch
+        self.root.after(500, self.start_server)
+
+    def _update_pulse(self):
+        """Update the pulse indicator animation with smooth anti-aliased PIL rendering."""
+        import math
+
+        size = self.pulse_size
+        scale = self.pulse_scale
+        big_size = size * scale
+
+        # Background color must match exactly: #1a1a1a = rgb(26, 26, 26)
+        bg_color = (26, 26, 26)
+
+        # Blue color for active state
+        blue_r, blue_g, blue_b = 80, 180, 255
+
+        if self.server_running:
+            # Animate - ripple flows outward from center
+            self.pulse_angle = (self.pulse_angle + 8) % 360
+
+            center_phase = self.pulse_angle
+            inner_phase = self.pulse_angle - 90
+            outer_phase = self.pulse_angle - 180
+
+            # Calculate opacity (0 to 1) for each element
+            center_opacity = (math.sin(math.radians(center_phase)) + 1) / 2
+            inner_opacity = (math.sin(math.radians(inner_phase)) + 1) / 2
+            outer_opacity = (math.sin(math.radians(outer_phase)) + 1) / 2
+
+            # Blend colors with background based on opacity
+            def blend(opacity):
+                return (
+                    int(bg_color[0] + (blue_r - bg_color[0]) * opacity),
+                    int(bg_color[1] + (blue_g - bg_color[1]) * opacity),
+                    int(bg_color[2] + (blue_b - bg_color[2]) * opacity)
+                )
+
+            center_color = blend(center_opacity)
+            inner_color = blend(inner_opacity)
+            outer_color = blend(outer_opacity)
+        else:
+            # Server not running - gray static
+            gray = (100, 100, 100)
+            center_color = gray
+            inner_color = gray
+            outer_color = gray
+
+        # Create image at high resolution
+        img = Image.new('RGB', (big_size, big_size), bg_color)
+        draw = ImageDraw.Draw(img)
+
+        cx, cy = big_size // 2, big_size // 2
+
+        # Draw outer ring (scaled up)
+        outer_radius = 18 * scale
+        ring_width = 3 * scale
+        draw.ellipse(
+            [cx - outer_radius, cy - outer_radius, cx + outer_radius, cy + outer_radius],
+            outline=outer_color, width=ring_width
         )
 
-        # Bind hover events
-        btn.bind("<Enter>", lambda e: btn.configure(bg=hover_color))
-        btn.bind("<Leave>", lambda e: btn.configure(bg=bg_color))
-
-        return btn
-
-    def _create_info_section(self, parent):
-        """Create info section."""
-        info_frame = tk.Frame(parent, bg=COLORS["bg_card"], relief=tk.FLAT, bd=1)
-        info_frame.pack(fill=tk.X, pady=(20, 0))
-
-        info_label = tk.Label(
-            info_frame,
-            text="TCP to HTTP Command Bridge for Sony Automator",
-            font=("Segoe UI", 10),
-            bg=COLORS["bg_card"],
-            fg=COLORS["text_gray"]
+        # Draw inner ring
+        inner_radius = 11 * scale
+        draw.ellipse(
+            [cx - inner_radius, cy - inner_radius, cx + inner_radius, cy + inner_radius],
+            outline=inner_color, width=ring_width
         )
-        info_label.pack(pady=15)
+
+        # Draw center dot (filled)
+        center_radius = 5 * scale
+        draw.ellipse(
+            [cx - center_radius, cy - center_radius, cx + center_radius, cy + center_radius],
+            fill=center_color
+        )
+
+        # Resize down with anti-aliasing
+        img = img.resize((size, size), Image.LANCZOS)
+
+        # Convert to PhotoImage and display
+        self.pulse_image = ImageTk.PhotoImage(img)
+        self.pulse_label.configure(image=self.pulse_image)
+
+        self.root.after(40, self._update_pulse)
+
+    def _update_runtime(self):
+        """Update the runtime display."""
+        if self.server_running:
+            elapsed = int(time.time() - self.start_time)
+            hours, remainder = divmod(elapsed, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            if hours > 0:
+                runtime_str = f"Runtime: {hours}h {minutes}m {seconds}s"
+            elif minutes > 0:
+                runtime_str = f"Runtime: {minutes}m {seconds}s"
+            else:
+                runtime_str = f"Runtime: {seconds}s"
+            self.runtime_label.config(text=runtime_str)
+        self.root.after(1000, self._update_runtime)
 
     def start_server(self):
         """Start the FastAPI server."""
@@ -293,23 +438,17 @@ class SonyAutomatorGUI:
         self.server_thread = threading.Thread(target=run_server, daemon=True)
         self.server_thread.start()
         self.server_running = True
+        self.status_label.config(text="Server running")
 
         logger.info("Server thread started")
 
-    def restart_server(self):
-        """Restart the server."""
-        messagebox.showinfo(
-            "Restart Required",
-            "To restart the server, please quit and restart the application."
-        )
-
-    def open_web_gui(self):
+    def launch_browser(self):
         """Open web interface in browser."""
         url = f"http://127.0.0.1:{self.server_port}"
         webbrowser.open(url)
         logger.info(f"Opening web interface: {url}")
 
-    def open_console(self):
+    def toggle_console(self):
         """Open console window showing logs."""
         if self.console_window and tk.Toplevel.winfo_exists(self.console_window):
             self.console_window.lift()
@@ -318,15 +457,15 @@ class SonyAutomatorGUI:
         self.console_window = tk.Toplevel(self.root)
         self.console_window.title("Console Log")
         self.console_window.geometry("800x600")
-        self.console_window.configure(bg=COLORS["bg_dark"])
+        self.console_window.configure(bg=self.bg_dark)
 
         # Console text area
         console_text = scrolledtext.ScrolledText(
             self.console_window,
             font=("Consolas", 10),
-            bg=COLORS["bg_dark"],
-            fg=COLORS["text_light"],
-            insertbackground=COLORS["text_light"],
+            bg=self.bg_dark,
+            fg=self.text_light,
+            insertbackground=self.text_light,
             wrap=tk.WORD
         )
         console_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -339,7 +478,14 @@ class SonyAutomatorGUI:
 
         console_text.configure(state=tk.DISABLED)
 
-    def hide_to_tray(self):
+    def restart_application(self):
+        """Restart the application."""
+        messagebox.showinfo(
+            "Restart Required",
+            "To restart the server, please quit and restart the application."
+        )
+
+    def minimize_to_tray(self):
         """Hide window to system tray."""
         self.root.withdraw()
         self._create_tray_icon()
@@ -349,21 +495,21 @@ class SonyAutomatorGUI:
         if self.tray_icon:
             return
 
-        # Create icon image
+        # Create icon image matching Elliott's style
         icon_image = self._generate_icon_image()
 
         # Create menu
         menu = pystray.Menu(
             pystray.MenuItem("Open", self._show_window),
-            pystray.MenuItem("Open Web Interface", self.open_web_gui),
-            pystray.MenuItem("Quit", self.quit_application)
+            pystray.MenuItem("Open Web Interface", self.launch_browser),
+            pystray.MenuItem("Quit", self.on_closing)
         )
 
         # Create tray icon
         self.tray_icon = pystray.Icon(
             "sony_automator",
             icon_image,
-            "Sony Automator Controls",
+            "Elliott's Sony Automator Controls",
             menu
         )
 
@@ -371,26 +517,36 @@ class SonyAutomatorGUI:
         threading.Thread(target=self.tray_icon.run, daemon=True).start()
 
     def _generate_icon_image(self):
-        """Generate tray icon image."""
-        # Create 64x64 icon
+        """Generate tray icon image matching Elliott's style."""
         size = 64
-        image = Image.new("RGB", (size, size), COLORS["bg_dark"])
-        draw = ImageDraw.Draw(image)
+        image = Image.new('RGBA', (size, size), (26, 26, 26, 255))
+        dc = ImageDraw.Draw(image)
 
-        # Draw circle
-        padding = 10
-        draw.ellipse(
-            [padding, padding, size - padding, size - padding],
-            fill=COLORS["accent_cyan"]
-        )
+        cx, cy = size // 2, size // 2
+        color = (0, 188, 212, 255)  # #00bcd4
+        line_width = max(2, size // 32)
 
-        # Draw "S" letter (simplified)
-        draw.text(
-            (size // 2, size // 2),
-            "S",
-            fill=COLORS["text_light"],
-            anchor="mm"
-        )
+        # Draw concentric circles
+        for radius_factor in [0.35, 0.24, 0.13]:
+            r = int(size * radius_factor)
+            dc.ellipse([cx-r, cy-r, cx+r, cy+r], outline=color, width=line_width)
+
+        # Draw lines to S, A, C letters positions
+        outer_r = int(size * 0.35)
+
+        # Line to S (top)
+        dc.line([(cx, cy - outer_r), (cx, 2)], fill=color, width=line_width)
+
+        # Line to A (bottom-left)
+        dc.line([(cx - 4, cy + outer_r - 2), (8, size - 4)], fill=color, width=line_width)
+
+        # Line to C (right)
+        dc.line([(cx + outer_r, cy), (size - 2, cy)], fill=color, width=line_width)
+
+        # Draw small checkmark in center
+        check_size = int(size * 0.08)
+        dc.line([(cx - check_size, cy), (cx - 2, cy + check_size//2)], fill=color, width=line_width)
+        dc.line([(cx - 2, cy + check_size//2), (cx + check_size, cy - check_size//2)], fill=color, width=line_width)
 
         return image
 
@@ -401,32 +557,9 @@ class SonyAutomatorGUI:
             self.tray_icon.stop()
             self.tray_icon = None
 
-    def _update_status(self):
-        """Update status indicator."""
-        if self.server_running:
-            self._draw_status_dot("green")
-            self.status_label.configure(text="Running")
-
-            # Calculate uptime
-            uptime_seconds = int(time.time() - core.server_start_time)
-            hours = uptime_seconds // 3600
-            minutes = (uptime_seconds % 3600) // 60
-            uptime_text = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
-
-            self.details_label.configure(
-                text=f"Port: {self.server_port} | Uptime: {uptime_text}"
-            )
-        else:
-            self._draw_status_dot("red")
-            self.status_label.configure(text="Stopped")
-            self.details_label.configure(text=f"Port: {self.server_port}")
-
-        # Schedule next update
-        self.root.after(2000, self._update_status)
-
     def on_closing(self):
         """Handle window close event."""
-        if messagebox.askokcancel("Quit", "Do you want to quit Sony Automator Controls?"):
+        if messagebox.askokcancel("Quit", "Do you want to quit Elliott's Sony Automator Controls?"):
             self.quit_application()
 
     def quit_application(self, icon=None, item=None):

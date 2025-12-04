@@ -4,7 +4,10 @@
       "Bash(copy:*)",
       "Bash(pip install:*)",
       "Bash(timeout 10 python:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nInitial commit: Sony Automator Controls v1.0.0\n\n- TCP to HTTP command bridge for Sony Automator devices\n- Desktop GUI with Tkinter matching Elliott''s house style\n- Web interface with 4 pages (Home, TCP Commands, Automator Macros, Command Mapping)\n- Multi-port TCP listener support\n- Automator API integration\n- Command mapping system\n- Configuration persistence\n- System tray support\n- ITV Reem fonts and branding\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(git push:*)",
+      "Bash(python -m sony_automator_controls:*)"
     ],
     "deny": [],
     "ask": []

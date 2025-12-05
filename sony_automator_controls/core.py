@@ -37,6 +37,10 @@ server_start_time = time.time()
 COMMAND_LOG: List[str] = []
 MAX_LOG_ENTRIES = 200
 
+# TCP Capture state
+tcp_capture_active = False
+tcp_capture_result = None
+
 
 def log_event(kind: str, detail: str):
     """Log an event to the command log."""
@@ -156,6 +160,8 @@ def save_config(config: dict):
 # TCP Server implementation
 async def handle_tcp_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, port: int):
     """Handle individual TCP client connection."""
+    global tcp_capture_active, tcp_capture_result
+
     addr = writer.get_extra_info('peername')
     logger.info(f"TCP client connected from {addr} on port {port}")
 
@@ -172,6 +178,16 @@ async def handle_tcp_client(reader: asyncio.StreamReader, writer: asyncio.Stream
 
             message = data.decode().strip()
             logger.info(f"Received TCP command on port {port}: {message}")
+
+            # If capture mode is active, store the command
+            if tcp_capture_active:
+                tcp_capture_result = {
+                    "command": message,
+                    "port": port,
+                    "source": str(addr)
+                }
+                log_event("TCP Capture", f"Captured command '{message}' from port {port}")
+                tcp_capture_active = False  # Disable capture after first command
 
             # Process the command
             await process_tcp_command(message, port)
@@ -222,11 +238,12 @@ async def process_tcp_command(command: str, port: int):
     log_event("Mapping Found", f"{tcp_cmd['name']} → {mapping['automator_macro_name']}")
 
     # Trigger HTTP request to Automator
-    await trigger_automator_macro(mapping["automator_macro_id"], mapping["automator_macro_name"])
+    item_type = mapping.get("automator_macro_type", "macro")  # Default to macro if not specified
+    await trigger_automator_macro(mapping["automator_macro_id"], mapping["automator_macro_name"], item_type)
 
 
-async def trigger_automator_macro(macro_id: str, macro_name: str):
-    """Trigger an Automator macro via HTTP."""
+async def trigger_automator_macro(macro_id: str, macro_name: str, item_type: str = "macro"):
+    """Trigger an Automator macro, button, or shortcut via HTTP."""
     global config_data
 
     automator_config = config_data.get("automator", {})
@@ -236,31 +253,37 @@ async def trigger_automator_macro(macro_id: str, macro_name: str):
         logger.warning("Automator integration is disabled")
         return
 
-    url = automator_config.get("url", "").rstrip("/")
-    api_key = automator_config.get("api_key", "")
+    url = automator_config.get("url", "").strip()
 
     if not url:
         log_event("Automator Error", "URL not configured")
         logger.error("Automator URL not configured")
         return
 
-    # Construct HTTP request (adjust based on your Automator API)
-    endpoint = f"{url}/api/macro/{macro_id}/trigger"
+    # Ensure URL has protocol
+    if not url.startswith('http://') and not url.startswith('https://'):
+        url = f"http://{url}"
 
-    headers = {}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    url = url.rstrip("/")
+
+    # Construct HTTP request based on type
+    if item_type == "button":
+        endpoint = f"{url}/api/trigger/button/{macro_id}"
+    elif item_type == "shortcut":
+        endpoint = f"{url}/api/trigger/shortcut/{macro_id}"
+    else:  # macro
+        endpoint = f"{url}/api/macro/{macro_id}"
 
     try:
-        logger.info(f"Triggering Automator macro: {macro_name} at {endpoint}")
-        log_event("HTTP Trigger", f"Calling {macro_name} at {endpoint}")
-        response = requests.post(endpoint, headers=headers, timeout=5)
+        logger.info(f"Triggering Automator {item_type}: {macro_name} at {endpoint}")
+        log_event("HTTP Trigger", f"Calling {item_type}: {macro_name}")
+        response = requests.get(endpoint, timeout=5)
         response.raise_for_status()
-        log_event("HTTP Success", f"Triggered {macro_name}")
-        logger.info(f"Successfully triggered macro: {macro_name}")
+        log_event("HTTP Success", f"Triggered {item_type}: {macro_name}")
+        logger.info(f"Successfully triggered {item_type}: {macro_name}")
     except requests.exceptions.RequestException as e:
         log_event("HTTP Error", f"Failed to trigger {macro_name}: {str(e)}")
-        logger.error(f"Error triggering Automator macro {macro_name}: {e}")
+        logger.error(f"Error triggering Automator {item_type} {macro_name}: {e}")
 
 
 async def start_tcp_server(port: int):
@@ -339,16 +362,17 @@ def check_automator_connection() -> dict:
         automator_status = {"connected": False, "last_check": datetime.now().isoformat(), "error": "Not configured"}
         return automator_status
 
-    url = automator_config.get("url", "").rstrip("/")
-    api_key = automator_config.get("api_key", "")
+    url = automator_config.get("url", "").strip()
 
-    headers = {}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    # Ensure URL has protocol
+    if url and not url.startswith('http://') and not url.startswith('https://'):
+        url = f"http://{url}"
+
+    url = url.rstrip("/")
 
     try:
         log_event("Automator Test", f"Testing connection to {url}")
-        response = requests.get(f"{url}/api/status", headers=headers, timeout=3)
+        response = requests.get(f"{url}/api/app/webconnection", timeout=5)
         response.raise_for_status()
         automator_status = {"connected": True, "last_check": datetime.now().isoformat(), "error": None}
         log_event("Automator Test", "Connection successful")
@@ -360,7 +384,7 @@ def check_automator_connection() -> dict:
 
 
 def fetch_automator_macros() -> List[Dict[str, Any]]:
-    """Fetch macros and shortcuts from Automator API."""
+    """Fetch macros, buttons, and shortcuts from Automator API."""
     global config_data
 
     automator_config = config_data.get("automator", {})
@@ -368,22 +392,64 @@ def fetch_automator_macros() -> List[Dict[str, Any]]:
     if not automator_config.get("enabled") or not automator_config.get("url"):
         return []
 
-    url = automator_config.get("url", "").rstrip("/")
-    api_key = automator_config.get("api_key", "")
+    url = automator_config.get("url", "").strip()
 
-    headers = {}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    # Ensure URL has protocol
+    if url and not url.startswith('http://') and not url.startswith('https://'):
+        url = f"http://{url}"
 
+    url = url.rstrip("/")
+
+    all_items = []
+
+    # Fetch macros
     try:
-        response = requests.get(f"{url}/api/macros", headers=headers, timeout=5)
+        response = requests.get(f"{url}/api/macro/", timeout=5)
         response.raise_for_status()
         macros = response.json()
         logger.info(f"Fetched {len(macros)} macros from Automator")
-        return macros
+        all_items.extend(macros)
     except requests.exceptions.RequestException as e:
         logger.error(f"Error fetching Automator macros: {e}")
-        return []
+
+    # Fetch buttons
+    try:
+        response = requests.get(f"{url}/api/trigger/button/", timeout=5)
+        response.raise_for_status()
+        buttons = response.json()
+        logger.info(f"Fetched {len(buttons)} buttons from Automator")
+        all_items.extend(buttons)
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching Automator buttons: {e}")
+
+    # Fetch shortcuts
+    try:
+        response = requests.get(f"{url}/api/trigger/shortcut/", timeout=5)
+        response.raise_for_status()
+        shortcuts = response.json()
+        logger.info(f"Fetched {len(shortcuts)} shortcuts from Automator")
+
+        # Add type and title to shortcuts (they don't have these fields in the API)
+        for shortcut in shortcuts:
+            shortcut["type"] = "shortcut"
+
+            # Build display title from keyboard shortcut components
+            key_parts = []
+            if shortcut.get("control"):
+                key_parts.append("Ctrl")
+            if shortcut.get("alt"):
+                key_parts.append("Alt")
+            if shortcut.get("shift"):
+                key_parts.append("Shift")
+            key_parts.append(shortcut.get("key", "Unknown"))
+
+            shortcut["title"] = " + ".join(key_parts)
+
+        all_items.extend(shortcuts)
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching Automator shortcuts: {e}")
+
+    return all_items
 
 
 # Application lifespan
@@ -1056,6 +1122,11 @@ async def home():
     minutes = (uptime_seconds % 3600) // 60
     uptime_text = f"{hours}h {minutes}m"
 
+    # Event log
+    event_log_html = "\\n".join(f"<div>{event}</div>" for event in COMMAND_LOG[-20:])
+    if not event_log_html:
+        event_log_html = "<div style='color: #888;'>No events yet...</div>"
+
     content = f"""
     <h1>Dashboard</h1>
 
@@ -1108,9 +1179,17 @@ async def home():
         </div>
     </div>
 
+    <div class="section">
+        <h2>Event Log</h2>
+        <p style="color: #888888; margin-bottom: 12px;">Recent commands and system events (last 20 entries)</p>
+        <div id="event-log" style="background: #000; color: #00bcd4; padding: 16px; border-radius: 8px; font-family: 'SF Mono', Monaco, 'Cascadia Code', Consolas, monospace; font-size: 13px; max-height: 300px; overflow-y: auto; line-height: 1.8;">
+            {event_log_html}
+        </div>
+    </div>
+
     <script>
-        // Auto-refresh every 5 seconds
-        setTimeout(() => location.reload(), 5000);
+        // Auto-refresh every 3 seconds
+        setTimeout(() => location.reload(), 3000);
     </script>
     """
 
@@ -1182,7 +1261,11 @@ async def tcp_commands_page():
         <div class="item-list">
             {commands_html}
         </div>
-        <button class="primary mt-20" onclick="showAddCommandForm()">Add TCP Command</button>
+        <div class="btn-row">
+            <button class="primary" onclick="showAddCommandForm()">Add TCP Command</button>
+            <button class="warning" onclick="startTCPCapture()">Listen for TCP Command</button>
+        </div>
+        <div id="capture-status" style="margin-top: 16px;"></div>
     </div>
 
     <script>
@@ -1298,6 +1381,85 @@ async def tcp_commands_page():
         function editCommand(id) {{
             alert('Edit functionality coming soon!');
         }}
+
+        // TCP Capture functions
+        let captureCheckInterval = null;
+
+        async function startTCPCapture() {{
+            const statusDiv = document.getElementById('capture-status');
+            statusDiv.innerHTML = '<div class="alert info">Starting TCP capture mode... Waiting for next TCP command...</div>';
+
+            try {{
+                const response = await fetch('/tcp/capture/start', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}}
+                }});
+
+                if (response.ok) {{
+                    // Start polling for capture result
+                    captureCheckInterval = setInterval(checkCaptureStatus, 500);
+
+                    // Auto-cancel after 30 seconds
+                    setTimeout(() => {{
+                        if (captureCheckInterval) {{
+                            cancelCapture();
+                        }}
+                    }}, 30000);
+                }} else {{
+                    statusDiv.innerHTML = '<div class="alert error">Failed to start capture mode</div>';
+                }}
+            }} catch (e) {{
+                statusDiv.innerHTML = '<div class="alert error">Error: ' + e + '</div>';
+            }}
+        }}
+
+        async function checkCaptureStatus() {{
+            try {{
+                const response = await fetch('/tcp/capture/status');
+                const data = await response.json();
+
+                if (data.status === 'captured') {{
+                    // Stop polling
+                    clearInterval(captureCheckInterval);
+                    captureCheckInterval = null;
+
+                    // Show captured command
+                    const cmd = data.data.command;
+                    const port = data.data.port;
+                    const source = data.data.source;
+
+                    const statusDiv = document.getElementById('capture-status');
+                    statusDiv.innerHTML = '<div class="alert success">Captured TCP command: <strong>' + cmd + '</strong> from port ' + port + ' (source: ' + source + ')</div>';
+
+                    // Prompt to add as command
+                    if (confirm('Captured command: "' + cmd + '"\\n\\nWould you like to add this as a new TCP command?')) {{
+                        const name = prompt('Command name:', cmd);
+                        const description = prompt('Description (optional):');
+                        if (name) {{
+                            addCommand(name, cmd, description || '');
+                        }}
+                    }}
+                }}
+            }} catch (e) {{
+                console.error('Error checking capture status:', e);
+            }}
+        }}
+
+        async function cancelCapture() {{
+            if (captureCheckInterval) {{
+                clearInterval(captureCheckInterval);
+                captureCheckInterval = null;
+            }}
+
+            await fetch('/tcp/capture/cancel', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}}
+            }});
+
+            const statusDiv = document.getElementById('capture-status');
+            statusDiv.innerHTML = '<div class="alert warning">Capture mode cancelled</div>';
+            setTimeout(() => statusDiv.innerHTML = '', 3000);
+        }}
     </script>
     """
 
@@ -1313,7 +1475,6 @@ async def automator_macros_page():
 
     # Configuration form
     url_value = automator_config.get("url", "")
-    api_key_value = automator_config.get("api_key", "")
     enabled_checked = "checked" if automator_config.get("enabled") else ""
 
     config_form = f"""
@@ -1322,11 +1483,8 @@ async def automator_macros_page():
         <form id="automatorConfigForm">
             <div class="form-group">
                 <label>Automator API URL</label>
-                <input type="text" id="automatorUrl" value="{url_value}" placeholder="http://your-automator-server:port">
-            </div>
-            <div class="form-group">
-                <label>API Key (if required)</label>
-                <input type="text" id="automatorApiKey" value="{api_key_value}" placeholder="Optional API key">
+                <input type="text" id="automatorUrl" value="{url_value}" placeholder="http://172.26.6.2:80">
+                <p style="color: #888888; font-size: 12px; margin-top: 6px;">Enter the full URL including protocol and port (e.g., http://172.26.6.2:80)</p>
             </div>
             <div class="form-group">
                 <label>
@@ -1341,41 +1499,78 @@ async def automator_macros_page():
     </div>
     """
 
-    # Fetch macros if configured
-    macros_html = ""
+    # Fetch and organize macros/buttons/shortcuts
+    macros_list = []
+    buttons_list = []
+    shortcuts_list = []
+
     if automator_config.get("enabled") and automator_config.get("url"):
-        macros = fetch_automator_macros()
+        all_items = fetch_automator_macros()
 
-        if macros:
-            for macro in macros:
-                macro_id = macro.get("id", "")
-                macro_name = macro.get("name", "Unknown")
-                macro_type = macro.get("type", "macro")
+        for item in all_items:
+            item_type = item.get("type", "")
+            if item_type == "button":
+                buttons_list.append(item)
+            elif item_type == "shortcut":
+                shortcuts_list.append(item)
+            else:
+                macros_list.append(item)
 
-                macros_html += f"""
-                <div class="item">
-                    <div class="item-info">
-                        <div class="item-title">{macro_name}</div>
-                        <div class="item-detail">ID: {macro_id} | Type: {macro_type}</div>
-                    </div>
-                    <div class="item-actions">
-                        <button class="success" onclick="testMacro('{macro_id}', '{macro_name}')">Test</button>
-                    </div>
+    # Build collapsible sections
+    def build_item_section(items, section_title, section_id):
+        if not items:
+            return f'<p style="color: #888888;">No {section_title.lower()} found.</p>'
+
+        items_html = ""
+        for item in items:
+            item_id = item.get("id", "")
+            item_name = item.get("title", item.get("name", "Unknown"))
+            item_type = item.get("type", "macro")  # Get item type, default to macro
+            items_html += f"""
+            <div class="item searchable-item" data-name="{item_name.lower()}" data-type="{section_id}">
+                <div class="item-info">
+                    <div class="item-title">{item_name}</div>
                 </div>
-                """
+                <div class="item-actions">
+                    <button class="success" onclick="testMacro('{item_id}', '{item_name}', '{item_type}')">Test</button>
+                </div>
+            </div>
+            """
+
+        return f"""
+        <details id="{section_id}-section">
+            <summary style="cursor: pointer; font-weight: 600; font-size: 16px; margin-bottom: 15px; padding: 10px; background: #252525; border-radius: 6px;">
+                {section_title} (<span id="{section_id}-count">{len(items)}</span>)
+            </summary>
+            <div class="item-list" id="{section_id}-list" style="margin-top: 12px;">
+                {items_html}
+            </div>
+        </details>
+        """
+
+    if automator_config.get("enabled") and automator_config.get("url"):
+        if not all_items:
+            content_html = '<div class="alert info">No macros, buttons, or shortcuts found or unable to connect to Automator.</div>'
         else:
-            macros_html = '<div class="alert info">No macros found or unable to connect to Automator.</div>'
+            content_html = f"""
+            {build_item_section(macros_list, "Macros", "macros")}
+            {build_item_section(buttons_list, "Buttons", "buttons")}
+            {build_item_section(shortcuts_list, "Shortcuts", "shortcuts")}
+            """
     else:
-        macros_html = '<div class="alert info">Configure and enable Automator integration to see macros.</div>'
+        content_html = '<div class="alert info">Configure and enable Automator integration to see macros, buttons, and shortcuts.</div>'
 
     macros_section = f"""
     <div class="section">
-        <h2>Available Macros & Shortcuts</h2>
-        <p style="color: #888888; margin-bottom: 20px;">Macros and shortcuts available in your Automator system.</p>
-        <div class="item-list">
-            {macros_html}
+        <h2>Available Macros, Buttons & Shortcuts</h2>
+        <p style="color: #888888; margin-bottom: 12px;">Items available in your Automator system. Click to expand/collapse sections.</p>
+
+        <div style="margin-bottom: 20px;">
+            <input type="text" id="searchBox" placeholder="Search across all items..." style="width: 100%; padding: 10px 14px; font-size: 14px; border-radius: 8px;" oninput="filterItems()">
         </div>
-        <button class="secondary mt-20" onclick="location.reload()">Refresh Macros</button>
+
+        {content_html}
+        <button class="secondary mt-20" onclick="location.reload()">Refresh</button>
     </div>
     """
 
@@ -1384,9 +1579,13 @@ async def automator_macros_page():
         document.getElementById('automatorConfigForm').addEventListener('submit', async (e) => {
             e.preventDefault();
 
-            const url = document.getElementById('automatorUrl').value;
-            const apiKey = document.getElementById('automatorApiKey').value;
+            let url = document.getElementById('automatorUrl').value.trim();
             const enabled = document.getElementById('automatorEnabled').checked;
+
+            // Ensure URL starts with http:// or https://
+            if (url && !url.startsWith('http://') && !url.startsWith('https://')) {
+                url = 'http://' + url;
+            }
 
             const response = await fetch('/api/config', {
                 method: 'POST',
@@ -1394,7 +1593,7 @@ async def automator_macros_page():
                 body: JSON.stringify({
                     automator: {
                         url: url,
-                        api_key: apiKey,
+                        api_key: "",
                         enabled: enabled
                     }
                 })
@@ -1423,15 +1622,55 @@ async def automator_macros_page():
             }
         }
 
-        async function testMacro(macroId, macroName) {
-            if (!confirm(`Test trigger macro: ${macroName}?`)) return;
+        async function testMacro(macroId, macroName, itemType = 'macro') {
+            if (!confirm(`Test trigger ${itemType}: ${macroName}?`)) return;
 
-            const response = await fetch(`/api/automator/trigger/${macroId}`, {method: 'POST'});
+            const response = await fetch(`/api/automator/trigger/${macroId}?item_type=${itemType}`, {method: 'POST'});
 
             if (response.ok) {
-                alert(`Successfully triggered: ${macroName}`);
+                alert(`Successfully triggered ${itemType}: ${macroName}`);
             } else {
-                alert(`Error triggering macro: ${macroName}`);
+                alert(`Error triggering ${itemType}: ${macroName}`);
+            }
+        }
+
+        function filterItems() {
+            const searchTerm = document.getElementById('searchBox').value.toLowerCase();
+            const items = document.querySelectorAll('.searchable-item');
+
+            let macrosVisible = 0;
+            let buttonsVisible = 0;
+            let shortcutsVisible = 0;
+
+            items.forEach(item => {
+                const itemName = item.getAttribute('data-name');
+                const itemType = item.getAttribute('data-type');
+                const matches = itemName.includes(searchTerm);
+
+                if (matches) {
+                    item.style.display = 'flex';
+                    if (itemType === 'macros') macrosVisible++;
+                    else if (itemType === 'buttons') buttonsVisible++;
+                    else if (itemType === 'shortcuts') shortcutsVisible++;
+                } else {
+                    item.style.display = 'none';
+                }
+            });
+
+            // Update counts
+            const macrosCount = document.getElementById('macros-count');
+            const buttonsCount = document.getElementById('buttons-count');
+            const shortcutsCount = document.getElementById('shortcuts-count');
+
+            if (macrosCount) macrosCount.textContent = macrosVisible;
+            if (buttonsCount) buttonsCount.textContent = buttonsVisible;
+            if (shortcutsCount) shortcutsCount.textContent = shortcutsVisible;
+
+            // Auto-expand sections with results when searching
+            if (searchTerm) {
+                if (macrosVisible > 0) document.getElementById('macros-section').setAttribute('open', '');
+                if (buttonsVisible > 0) document.getElementById('buttons-section').setAttribute('open', '');
+                if (shortcutsVisible > 0) document.getElementById('shortcuts-section').setAttribute('open', '');
             }
         }
     </script>
@@ -1488,21 +1727,30 @@ async def command_mapping_page():
                 current_mapping = m
                 break
 
-        # Build select options
-        options_html = '<option value="">-- Not Mapped --</option>'
+        # Build datalist options for searchable dropdown
+        options_html = ''
+        current_value = ''
         for macro in macros:
             macro_id = macro.get("id", "")
-            macro_name = macro.get("name", "Unknown")
-            selected = "selected" if current_mapping and current_mapping["automator_macro_id"] == macro_id else ""
-            options_html += f'<option value="{macro_id}" {selected}>{macro_name}</option>'
+            macro_name = macro.get("title", macro.get("name", "Unknown"))
+            macro_type = macro.get("type", "")
+            type_label = f" [{macro_type}]" if macro_type else ""
+            display_text = f"{macro_name}{type_label}"
+            options_html += f'<option value="{display_text}" data-id="{macro_id}" data-type="{macro_type}">'
+
+            # Set current value if this is the mapped macro
+            if current_mapping and current_mapping["automator_macro_id"] == macro_id:
+                current_value = display_text
 
         table_rows += f"""
         <tr>
             <td><strong>{tcp_name}</strong><br><span style="color: #888888; font-size: 12px;">{tcp_trigger}</span></td>
             <td>
-                <select class="mapping-select" data-tcp-id="{tcp_id}" style="width: 100%;">
+                <input list="macros-{tcp_id}" class="mapping-input" data-tcp-id="{tcp_id}" value="{current_value}"
+                       placeholder="Type to search macros..." style="width: 100%; padding: 8px;">
+                <datalist id="macros-{tcp_id}">
                     {options_html}
-                </select>
+                </datalist>
             </td>
             <td style="text-align: center;">
                 <button class="success" onclick="saveMapping('{tcp_id}')">Save</button>
@@ -1543,36 +1791,56 @@ async def command_mapping_page():
         const macros = {json.dumps(macros)};
 
         async function saveMapping(tcpId) {{
-            const select = document.querySelector(`select[data-tcp-id="${{tcpId}}"]`);
-            const macroId = select.value;
+            const input = document.querySelector(`input[data-tcp-id="${{tcpId}}"]`);
+            const displayValue = input.value.trim();
 
-            if (!macroId) {{
+            if (!displayValue) {{
                 // Remove mapping
                 await removeMappingForTcpCommand(tcpId);
                 return;
             }}
 
-            const macro = macros.find(m => m.id === macroId);
-            const macroName = macro ? macro.name : '';
+            // Find the macro by matching the display text
+            const macro = macros.find(m => {{
+                const type_label = m.type ? ` [${{m.type}}]` : '';
+                return ((m.title || m.name || '') + type_label) === displayValue;
+            }});
 
-            await updateMapping(tcpId, macroId, macroName);
+            if (!macro) {{
+                alert('Please select a valid macro from the list');
+                return;
+            }}
+
+            const macroId = macro.id;
+            const macroName = macro.title || macro.name || '';
+            const macroType = macro.type || 'macro';
+
+            await updateMapping(tcpId, macroId, macroName, macroType);
         }}
 
         async function saveAllMappings() {{
-            const selects = document.querySelectorAll('.mapping-select');
+            const inputs = document.querySelectorAll('.mapping-input');
             const newMappings = [];
 
-            for (const select of selects) {{
-                const tcpId = select.dataset.tcpId;
-                const macroId = select.value;
+            for (const input of inputs) {{
+                const tcpId = input.dataset.tcpId;
+                const displayValue = input.value.trim();
 
-                if (macroId) {{
-                    const macro = macros.find(m => m.id === macroId);
-                    newMappings.push({{
-                        tcp_command_id: tcpId,
-                        automator_macro_id: macroId,
-                        automator_macro_name: macro ? macro.name : ''
+                if (displayValue) {{
+                    // Find the macro by matching the display text
+                    const macro = macros.find(m => {{
+                        const type_label = m.type ? ` [${{m.type}}]` : '';
+                        return ((m.title || m.name || '') + type_label) === displayValue;
                     }});
+
+                    if (macro) {{
+                        newMappings.push({{
+                            tcp_command_id: tcpId,
+                            automator_macro_id: macro.id,
+                            automator_macro_name: macro.title || macro.name || '',
+                            automator_macro_type: macro.type || 'macro'
+                        }});
+                    }}
                 }}
             }}
 
@@ -1591,7 +1859,7 @@ async def command_mapping_page():
             }}
         }}
 
-        async function updateMapping(tcpId, macroId, macroName) {{
+        async function updateMapping(tcpId, macroId, macroName, macroType) {{
             const currentMappings = {json.dumps(mappings)};
 
             // Remove existing mapping for this TCP command
@@ -1601,7 +1869,8 @@ async def command_mapping_page():
             filteredMappings.push({{
                 tcp_command_id: tcpId,
                 automator_macro_id: macroId,
-                automator_macro_name: macroName
+                automator_macro_name: macroName,
+                automator_macro_type: macroType
             }});
 
             const response = await fetch('/api/config', {{
@@ -1805,10 +2074,10 @@ async def api_automator_test():
 
 
 @app.post("/api/automator/trigger/{macro_id}")
-async def api_trigger_macro(macro_id: str):
-    """Manually trigger an Automator macro."""
-    await trigger_automator_macro(macro_id, f"Manual trigger: {macro_id}")
-    return {"success": True, "macro_id": macro_id}
+async def api_trigger_macro(macro_id: str, item_type: str = "macro"):
+    """Manually trigger an Automator macro, button, or shortcut."""
+    await trigger_automator_macro(macro_id, f"Manual trigger: {macro_id}", item_type)
+    return {"success": True, "macro_id": macro_id, "type": item_type}
 
 
 @app.post("/api/config")
@@ -1867,6 +2136,40 @@ async def health():
 async def get_events():
     """Get recent command/event log entries."""
     return {"events": COMMAND_LOG[-100:]}
+
+
+@app.post("/tcp/capture/start")
+async def start_tcp_capture():
+    """Start listening for the next TCP command."""
+    global tcp_capture_active, tcp_capture_result
+    tcp_capture_active = True
+    tcp_capture_result = None
+    log_event("TCP Capture", "Started listening for TCP command")
+    return {"status": "listening", "message": "Waiting for next TCP command..."}
+
+
+@app.get("/tcp/capture/status")
+async def get_tcp_capture_status():
+    """Get current TCP capture status."""
+    global tcp_capture_active, tcp_capture_result
+    if tcp_capture_result:
+        result = tcp_capture_result
+        tcp_capture_result = None  # Clear after reading
+        return {"status": "captured", "data": result}
+    elif tcp_capture_active:
+        return {"status": "listening", "data": None}
+    else:
+        return {"status": "idle", "data": None}
+
+
+@app.post("/tcp/capture/cancel")
+async def cancel_tcp_capture():
+    """Cancel TCP capture mode."""
+    global tcp_capture_active, tcp_capture_result
+    tcp_capture_active = False
+    tcp_capture_result = None
+    log_event("TCP Capture", "Cancelled")
+    return {"status": "cancelled"}
 
 
 @app.get("/settings/json")

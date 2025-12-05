@@ -428,6 +428,23 @@ class SonyAutomatorGUI:
             logger.warning("Server already running")
             return
 
+        # Check if port is already in use
+        try:
+            test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            test_socket.settimeout(1)
+            result = test_socket.connect_ex(('127.0.0.1', self.server_port))
+            test_socket.close()
+
+            if result == 0:
+                # Port is in use
+                error_msg = f"Port {self.server_port} is already in use.\n\nAnother instance may be running.\nPlease close the other instance or change the port."
+                messagebox.showerror("Port Already In Use", error_msg)
+                logger.error(f"Port {self.server_port} already in use")
+                self.quit_application()
+                return
+        except Exception as e:
+            logger.warning(f"Could not check port status: {e}")
+
         def run_server():
             try:
                 logger.info(f"Starting server on port {self.server_port}")

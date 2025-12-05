@@ -13,6 +13,7 @@ import pystray
 from PIL import Image, ImageDraw, ImageTk
 import uvicorn
 from pathlib import Path
+import psutil
 
 from sony_automator_controls import core
 
@@ -32,6 +33,27 @@ def get_local_ip() -> str:
             return s.getsockname()[0]
     except Exception:
         return "127.0.0.1"
+
+
+def is_port_in_use(port: int) -> bool:
+    """Check if a port is already in use."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(('localhost', port)) == 0
+
+
+def kill_process_on_port(port: int) -> bool:
+    """Kill any process using the specified port."""
+    killed = False
+    for proc in psutil.process_iter(['pid', 'name']):
+        try:
+            for conn in proc.connections():
+                if conn.laddr.port == port:
+                    logger.info(f"Killing process {proc.info['name']} (PID: {proc.info['pid']}) on port {port}")
+                    proc.kill()
+                    killed = True
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+    return killed
 
 
 class SonyAutomatorGUI:
@@ -428,32 +450,26 @@ class SonyAutomatorGUI:
             logger.warning("Server already running")
             return
 
-        # Check if port is already in use
-        try:
-            test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            test_socket.settimeout(1)
-            result = test_socket.connect_ex(('127.0.0.1', self.server_port))
-            test_socket.close()
-
-            if result == 0:
-                # Port is in use
-                error_msg = f"Port {self.server_port} is already in use.\n\nAnother instance may be running.\nPlease close the other instance or change the port."
-                messagebox.showerror("Port Already In Use", error_msg)
-                logger.error(f"Port {self.server_port} already in use")
-                self.quit_application()
-                return
-        except Exception as e:
-            logger.warning(f"Could not check port status: {e}")
+        # Automatically kill any existing instance on the port
+        if is_port_in_use(self.server_port):
+            logger.info(f"Port {self.server_port} in use, closing existing instance...")
+            kill_process_on_port(self.server_port)
+            # Wait a moment for the port to be released
+            time.sleep(0.5)
 
         def run_server():
             try:
                 logger.info(f"Starting server on port {self.server_port}")
-                uvicorn.run(
+                config = uvicorn.Config(
                     core.app,
-                    host="127.0.0.1",
+                    host="0.0.0.0",
                     port=self.server_port,
-                    log_level="info"
+                    log_level="info",
+                    access_log=True,
+                    log_config=None
                 )
+                server = uvicorn.Server(config)
+                server.run()
             except Exception as e:
                 logger.error(f"Error running server: {e}")
 
@@ -463,9 +479,6 @@ class SonyAutomatorGUI:
         self.status_label.config(text="Server running")
 
         logger.info("Server thread started")
-
-        # Automatically open browser after a short delay to let server start
-        self.root.after(2000, self.launch_browser)
 
     def launch_browser(self):
         """Open web interface in browser."""

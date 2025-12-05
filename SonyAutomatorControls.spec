@@ -45,6 +45,7 @@ a = Analysis(
         'PIL',
         'PIL.Image',
         'PIL.ImageDraw',
+        'psutil',
     ],
     hookspath=[],
     hooksconfig={},

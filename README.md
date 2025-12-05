@@ -83,11 +83,39 @@ Use the test buttons in the web interface to manually trigger Automator macros.
 
 ## Building Executable
 
+### Install PyInstaller
+
 ```bash
-pyinstaller SonyAutomatorControls.spec
+pip install pyinstaller
 ```
 
-The executable will be in the `dist` folder.
+### Build the Executable
+
+```bash
+python -m PyInstaller SonyAutomatorControls.spec
+```
+
+The executable will be in the `dist/` folder as `SonyAutomatorControls-1.0.0.exe`.
+
+### Running the Executable
+
+Simply double-click `SonyAutomatorControls-1.0.0.exe` to launch the application with the GUI. The application will:
+- Start the web server on the configured port (default: 3114)
+- Open the desktop GUI with system tray support
+- Begin listening for TCP commands on configured ports
+
+You can also run it from command line:
+
+```bash
+# Run with GUI (default)
+.\dist\SonyAutomatorControls-1.0.0.exe
+
+# Run without GUI (server only)
+.\dist\SonyAutomatorControls-1.0.0.exe --no-gui
+
+# Run on custom port
+.\dist\SonyAutomatorControls-1.0.0.exe --port 8080
+```
 
 ## Web Interface
 

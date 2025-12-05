@@ -1,11 +1,13 @@
 """GUI Launcher for Sony Automator Controls with system tray support."""
 
+import sys
 import time
 import threading
 import webbrowser
 import logging
 import tkinter as tk
 from tkinter import scrolledtext, messagebox
+from io import StringIO
 import socket
 import pystray
 from PIL import Image, ImageDraw, ImageTk
@@ -66,6 +68,9 @@ class SonyAutomatorGUI:
         self.server_thread = None
         self.server_running = False
         self.console_window = None
+        self.console_text = None
+        self.console_visible = False
+        self.log_handler = None
         self.tray_icon = None
 
         # Load configuration
@@ -449,34 +454,96 @@ class SonyAutomatorGUI:
         logger.info(f"Opening web interface: {url}")
 
     def toggle_console(self):
-        """Open console window showing logs."""
-        if self.console_window and tk.Toplevel.winfo_exists(self.console_window):
-            self.console_window.lift()
-            return
+        """Toggle console window visibility."""
+        try:
+            window_exists = self.console_window is not None and self.console_window.winfo_exists()
+        except:
+            window_exists = False
 
-        self.console_window = tk.Toplevel(self.root)
-        self.console_window.title("Console Log")
-        self.console_window.geometry("800x600")
-        self.console_window.configure(bg=self.bg_dark)
+        if not window_exists:
+            # Create console window
+            self.console_window = tk.Toplevel(self.root)
+            self.console_window.title("Console Output")
+            self.console_window.geometry("800x400")
+            self.console_window.configure(bg=self.bg_dark)
 
-        # Console text area
-        console_text = scrolledtext.ScrolledText(
-            self.console_window,
-            font=("Consolas", 10),
-            bg=self.bg_dark,
-            fg=self.text_light,
-            insertbackground=self.text_light,
-            wrap=tk.WORD
-        )
-        console_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+            # Handle window close via X button
+            self.console_window.protocol("WM_DELETE_WINDOW", self._on_console_close)
 
-        console_text.insert(tk.END, "Sony Automator Controls - Console Log\n")
-        console_text.insert(tk.END, "=" * 60 + "\n\n")
-        console_text.insert(tk.END, f"Server running on port {self.server_port}\n")
-        console_text.insert(tk.END, f"Web interface: http://127.0.0.1:{self.server_port}\n\n")
-        console_text.insert(tk.END, "Logs will appear here...\n")
+            # Console output
+            self.console_text = scrolledtext.ScrolledText(
+                self.console_window,
+                bg="#1e1e1e",
+                fg="#d4d4d4",
+                font=("Consolas", 9),
+                relief=tk.FLAT,
+                wrap=tk.WORD
+            )
+            self.console_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        console_text.configure(state=tk.DISABLED)
+            # Add initial status message
+            local_ip = get_local_ip()
+            self.console_text.insert(tk.END, f"Elliott's Sony Automator Controls v{core.__version__}\n")
+            self.console_text.insert(tk.END, "=" * 60 + "\n")
+            if self.server_running:
+                self.console_text.insert(tk.END, f"✓ Server running on http://0.0.0.0:{self.server_port}\n")
+                self.console_text.insert(tk.END, f"  Network: http://{local_ip}:{self.server_port}\n")
+            else:
+                self.console_text.insert(tk.END, "⚠ Server not running\n")
+            self.console_text.insert(tk.END, "=" * 60 + "\n\n")
+            self.console_text.insert(tk.END, "Console output will appear here...\n\n")
+
+            # Redirect stdout to console
+            sys.stdout = ConsoleRedirector(self.console_text)
+            sys.stderr = ConsoleRedirector(self.console_text)
+
+            # Set up logging handler for the root logger
+            self.log_handler = TkinterLogHandler(self.console_text)
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S')
+            self.log_handler.setFormatter(formatter)
+            logging.getLogger().addHandler(self.log_handler)
+            logging.getLogger().setLevel(logging.INFO)
+
+            # Write a test message
+            print(f"[Console] Console window opened at {time.strftime('%H:%M:%S')}")
+
+            self._update_console_button(True)
+            self.console_visible = True
+        else:
+            self._close_console()
+
+    def _on_console_close(self):
+        """Handle console window being closed via X button."""
+        self._close_console()
+
+    def _close_console(self):
+        """Close the console window and clean up."""
+        if self.log_handler:
+            logging.getLogger().removeHandler(self.log_handler)
+            self.log_handler = None
+        if self.console_window:
+            try:
+                self.console_window.destroy()
+            except:
+                pass
+        self.console_window = None
+        self.console_text = None
+        self._update_console_button(False)
+        self.console_visible = False
+
+    def _update_console_button(self, is_open):
+        """Update the console button text based on state."""
+        if hasattr(self, 'console_toggle_btn') and self.console_toggle_btn:
+            try:
+                # Find the text item in the canvas and update it
+                text_items = self.console_toggle_btn.find_all()
+                for item in text_items:
+                    if self.console_toggle_btn.type(item) == "text":
+                        new_text = "Close Console" if is_open else "Open Console"
+                        self.console_toggle_btn.itemconfig(item, text=new_text)
+                        break
+            except:
+                pass
 
     def restart_application(self):
         """Restart the application."""
@@ -576,6 +643,41 @@ class SonyAutomatorGUI:
     def run(self):
         """Run the GUI application."""
         self.root.mainloop()
+
+
+class ConsoleRedirector:
+    """Redirect stdout/stderr to a Text widget."""
+
+    def __init__(self, text_widget):
+        self.text_widget = text_widget
+        self.buffer = StringIO()
+
+    def write(self, message):
+        try:
+            self.text_widget.insert(tk.END, message)
+            self.text_widget.see(tk.END)
+        except:
+            pass  # Widget may be destroyed
+        self.buffer.write(message)
+
+    def flush(self):
+        pass
+
+
+class TkinterLogHandler(logging.Handler):
+    """Custom logging handler that writes to a Tkinter Text widget."""
+
+    def __init__(self, text_widget):
+        super().__init__()
+        self.text_widget = text_widget
+
+    def emit(self, record):
+        try:
+            msg = self.format(record) + '\n'
+            self.text_widget.insert(tk.END, msg)
+            self.text_widget.see(tk.END)
+        except:
+            pass  # Widget may be destroyed
 
 
 def main():

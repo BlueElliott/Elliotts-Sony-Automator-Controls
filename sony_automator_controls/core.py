@@ -33,6 +33,25 @@ automator_status = {"connected": False, "last_check": None, "error": None}
 config_data = {}
 server_start_time = time.time()
 
+# Command/Event logging
+COMMAND_LOG: List[str] = []
+MAX_LOG_ENTRIES = 200
+
+
+def log_event(kind: str, detail: str):
+    """Log an event to the command log."""
+    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    line = f"[{ts}] {kind}: {detail}"
+    COMMAND_LOG.append(line)
+    if len(COMMAND_LOG) > MAX_LOG_ENTRIES:
+        del COMMAND_LOG[: len(COMMAND_LOG) - MAX_LOG_ENTRIES]
+    logger.info(f"{kind}: {detail}")
+
+
+def effective_port() -> int:
+    """Get the effective port the server is running on."""
+    return config_data.get("web_port", 3114)
+
 # Configuration file path
 CONFIG_DIR = Path.home() / ".sony_automator_controls"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -90,6 +109,11 @@ class ConfigUpdate(BaseModel):
     automator: Optional[AutomatorConfig] = None
     command_mappings: Optional[List[CommandMapping]] = None
     web_port: Optional[int] = None
+
+
+class SettingsIn(BaseModel):
+    web_port: Optional[int] = None
+    theme: Optional[str] = "dark"
 
 
 # Configuration management
@@ -166,6 +190,7 @@ async def process_tcp_command(command: str, port: int):
     global config_data
 
     logger.info(f"Processing TCP command: {command} from port {port}")
+    log_event("TCP Command", f"Received '{command}' on port {port}")
 
     # Find matching TCP command in config
     tcp_cmd = None
@@ -176,6 +201,7 @@ async def process_tcp_command(command: str, port: int):
 
     if not tcp_cmd:
         logger.warning(f"No TCP command definition found for: {command}")
+        log_event("TCP Warning", f"No definition for command '{command}'")
         return
 
     logger.info(f"Matched TCP command: {tcp_cmd['name']} (ID: {tcp_cmd['id']})")
@@ -189,9 +215,11 @@ async def process_tcp_command(command: str, port: int):
 
     if not mapping:
         logger.warning(f"No mapping found for TCP command: {tcp_cmd['name']}")
+        log_event("TCP Warning", f"No mapping for '{tcp_cmd['name']}'")
         return
 
     logger.info(f"Found mapping to Automator macro: {mapping['automator_macro_name']} (ID: {mapping['automator_macro_id']})")
+    log_event("Mapping Found", f"{tcp_cmd['name']} → {mapping['automator_macro_name']}")
 
     # Trigger HTTP request to Automator
     await trigger_automator_macro(mapping["automator_macro_id"], mapping["automator_macro_name"])
@@ -204,6 +232,7 @@ async def trigger_automator_macro(macro_id: str, macro_name: str):
     automator_config = config_data.get("automator", {})
 
     if not automator_config.get("enabled"):
+        log_event("Automator Warning", "Integration is disabled")
         logger.warning("Automator integration is disabled")
         return
 
@@ -211,6 +240,7 @@ async def trigger_automator_macro(macro_id: str, macro_name: str):
     api_key = automator_config.get("api_key", "")
 
     if not url:
+        log_event("Automator Error", "URL not configured")
         logger.error("Automator URL not configured")
         return
 
@@ -223,10 +253,13 @@ async def trigger_automator_macro(macro_id: str, macro_name: str):
 
     try:
         logger.info(f"Triggering Automator macro: {macro_name} at {endpoint}")
+        log_event("HTTP Trigger", f"Calling {macro_name} at {endpoint}")
         response = requests.post(endpoint, headers=headers, timeout=5)
         response.raise_for_status()
+        log_event("HTTP Success", f"Triggered {macro_name}")
         logger.info(f"Successfully triggered macro: {macro_name}")
     except requests.exceptions.RequestException as e:
+        log_event("HTTP Error", f"Failed to trigger {macro_name}: {str(e)}")
         logger.error(f"Error triggering Automator macro {macro_name}: {e}")
 
 
@@ -235,6 +268,7 @@ async def start_tcp_server(port: int):
     global tcp_servers
 
     if port in tcp_servers:
+        log_event("TCP Warning", f"Server already running on port {port}")
         logger.warning(f"TCP server already running on port {port}")
         return
 
@@ -246,12 +280,14 @@ async def start_tcp_server(port: int):
         )
         tcp_servers[port] = server
         tcp_connections[port] = []
+        log_event("TCP Server", f"Started on port {port}")
         logger.info(f"TCP server started on port {port}")
 
         # Start serving in background
         asyncio.create_task(server.serve_forever())
 
     except Exception as e:
+        log_event("TCP Error", f"Failed to start server on port {port}: {str(e)}")
         logger.error(f"Error starting TCP server on port {port}: {e}")
 
 
@@ -260,6 +296,7 @@ async def stop_tcp_server(port: int):
     global tcp_servers
 
     if port not in tcp_servers:
+        log_event("TCP Warning", f"No server running on port {port}")
         logger.warning(f"No TCP server running on port {port}")
         return
 
@@ -270,8 +307,10 @@ async def stop_tcp_server(port: int):
         del tcp_servers[port]
         if port in tcp_connections:
             del tcp_connections[port]
+        log_event("TCP Server", f"Stopped on port {port}")
         logger.info(f"TCP server stopped on port {port}")
     except Exception as e:
+        log_event("TCP Error", f"Failed to stop server on port {port}: {str(e)}")
         logger.error(f"Error stopping TCP server on port {port}: {e}")
 
 
@@ -308,11 +347,14 @@ def check_automator_connection() -> dict:
         headers["Authorization"] = f"Bearer {api_key}"
 
     try:
+        log_event("Automator Test", f"Testing connection to {url}")
         response = requests.get(f"{url}/api/status", headers=headers, timeout=3)
         response.raise_for_status()
         automator_status = {"connected": True, "last_check": datetime.now().isoformat(), "error": None}
+        log_event("Automator Test", "Connection successful")
     except requests.exceptions.RequestException as e:
         automator_status = {"connected": False, "last_check": datetime.now().isoformat(), "error": str(e)}
+        log_event("Automator Test", f"Connection failed: {str(e)}")
 
     return automator_status
 
@@ -352,6 +394,7 @@ async def lifespan(app: FastAPI):
 
     # Startup
     logger.info("Starting Sony Automator Controls...")
+    log_event("System", f"Starting Elliott's Sony Automator Controls v{__version__}")
     config_data = load_config()
 
     # Start TCP servers for enabled listeners
@@ -359,10 +402,13 @@ async def lifespan(app: FastAPI):
         if listener["enabled"]:
             await start_tcp_server(listener["port"])
 
+    log_event("System", "Server startup complete")
+
     yield
 
     # Shutdown
     logger.info("Shutting down Sony Automator Controls...")
+    log_event("System", "Shutting down server")
     # Stop all TCP servers
     ports_to_stop = list(tcp_servers.keys())
     for port in ports_to_stop:
@@ -381,15 +427,27 @@ if static_dir.exists():
 # Styling functions
 def _get_base_styles() -> str:
     """Return base CSS styles matching Elliott's Singular Control exactly."""
-    # Modern dark theme - matched to desktop GUI colors
-    bg = "#1a1a1a"
-    fg = "#ffffff"
-    card_bg = "#2d2d2d"
-    border = "#3d3d3d"
-    accent = "#00bcd4"
-    accent_hover = "#0097a7"
-    text_muted = "#888888"
-    input_bg = "#252525"
+    # Check theme and set colors accordingly
+    theme = config_data.get("theme", "dark")
+    if theme == "light":
+        bg = "#f0f2f5"
+        fg = "#1a1a2e"
+        card_bg = "#ffffff"
+        border = "#e0e0e0"
+        accent = "#00bcd4"
+        accent_hover = "#0097a7"
+        text_muted = "#666666"
+        input_bg = "#fafafa"
+    else:
+        # Modern dark theme - matched to desktop GUI colors
+        bg = "#1a1a1a"
+        fg = "#ffffff"
+        card_bg = "#2d2d2d"
+        border = "#3d3d3d"
+        accent = "#00bcd4"
+        accent_hover = "#0097a7"
+        text_muted = "#888888"
+        input_bg = "#252525"
 
     return f"""
     <style>
@@ -432,16 +490,16 @@ def _get_base_styles() -> str:
             line-height: 1.6;
         }}
 
-        .container {
+        .container {{
             max-width: 1200px;
             margin: 0 auto;
             padding: 20px;
-        }
+        }}
 
-        h1, h2, h3 {
+        h1, h2, h3 {{
             font-weight: 500;
             margin-bottom: 20px;
-        }
+        }}
 
         h1 {{
             font-size: 28px;
@@ -535,69 +593,94 @@ def _get_base_styles() -> str:
         }}
 
         /* Status indicators */
-        .status-grid {
+        .status-grid {{
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
             gap: 20px;
             margin-bottom: 30px;
-        }
+        }}
 
-        .status-card {
+        .status-card {{
             background: #2d2d2d;
             border: 1px solid #3d3d3d;
             border-radius: 8px;
             padding: 20px;
-        }
+        }}
 
-        .status-card h3 {
+        .status-card h3 {{
             font-size: 16px;
             margin-bottom: 15px;
             color: #888888;
-        }
+        }}
 
-        .status-indicator {
+        .status-indicator {{
             display: flex;
             align-items: center;
             gap: 12px;
             margin-bottom: 10px;
-        }
+        }}
 
-        .status-dot {
+        .status-dot {{
             width: 12px;
             height: 12px;
             border-radius: 50%;
             animation: pulse 1.5s ease-in-out infinite;
-        }
+        }}
 
-        .status-dot.connected {
+        .status-dot.connected {{
             background: #4caf50;
-        }
+        }}
 
-        .status-dot.disconnected {
+        .status-dot.disconnected {{
             background: #ef4444;
             animation: none;
-        }
+        }}
 
-        .status-dot.idle {
+        .status-dot.idle {{
             background: #888888;
             animation: none;
-        }
+        }}
 
-        @keyframes pulse {
-            0%, 100% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.6; transform: scale(1.1); }
-        }
+        @keyframes pulse {{
+            0%, 100% {{ opacity: 1; transform: scale(1); }}
+            50% {{ opacity: 0.6; transform: scale(1.1); }}
+        }}
 
-        .status-text {
+        .status-text {{
             font-size: 16px;
             font-weight: 500;
-        }
+        }}
 
-        .status-detail {
+        .status-detail {{
             font-size: 12px;
             color: #888888;
             margin-left: 24px;
-        }
+        }}
+
+        /* Status badges - Elliott's style */
+        .status-badge {{
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 13px;
+        }}
+
+        .status-badge.success {{
+            background: #10b98120;
+            color: #10b981;
+        }}
+
+        .status-badge.error {{
+            background: #ef444420;
+            color: #ef4444;
+        }}
+
+        .status-badge.warning {{
+            background: #f59e0b20;
+            color: #f59e0b;
+        }}
 
         /* Buttons - Elliott's style with transform */
         button {{
@@ -739,14 +822,42 @@ def _get_base_styles() -> str:
             background: {border};
         }}
 
+        /* Code blocks - Elliott's style */
+        pre {{
+            background: #000;
+            color: {accent};
+            padding: 16px;
+            white-space: pre-wrap;
+            max-height: 250px;
+            overflow: auto;
+            border-radius: 8px;
+            font-size: 13px;
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', Consolas, monospace;
+            border: 1px solid {border};
+        }}
+
+        code {{
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', Consolas, monospace;
+            background: {input_bg};
+            padding: 3px 8px;
+            border-radius: 6px;
+            font-size: 12px;
+            border: 1px solid {border};
+            display: inline-block;
+            max-width: 450px;
+            overflow-x: auto;
+            white-space: nowrap;
+            vertical-align: middle;
+        }}
+
         /* Lists */
-        .item-list {
+        .item-list {{
             display: flex;
             flex-direction: column;
             gap: 12px;
-        }
+        }}
 
-        .item {
+        .item {{
             background: #2d2d2d;
             border: 1px solid #3d3d3d;
             border-radius: 6px;
@@ -754,97 +865,97 @@ def _get_base_styles() -> str:
             display: flex;
             justify-content: space-between;
             align-items: center;
-        }
+        }}
 
-        .item-info {
+        .item-info {{
             flex: 1;
-        }
+        }}
 
-        .item-title {
+        .item-title {{
             font-weight: 500;
             margin-bottom: 5px;
-        }
+        }}
 
-        .item-detail {
+        .item-detail {{
             font-size: 12px;
             color: #888888;
-        }
+        }}
 
-        .item-actions {
+        .item-actions {{
             display: flex;
             gap: 8px;
-        }
+        }}
 
-        .item-actions button {
+        .item-actions button {{
             padding: 6px 12px;
             font-size: 12px;
-        }
+        }}
 
         /* Matrix/Grid */
-        .mapping-grid {
+        .mapping-grid {{
             overflow-x: auto;
-        }
+        }}
 
-        .mapping-table {
+        .mapping-table {{
             min-width: 800px;
-        }
+        }}
 
-        .mapping-cell {
+        .mapping-cell {{
             text-align: center;
-        }
+        }}
 
-        .mapping-cell input[type="checkbox"] {
+        .mapping-cell input[type="checkbox"] {{
             width: auto;
             cursor: pointer;
-        }
+        }}
 
         /* Alerts */
-        .alert {
+        .alert {{
             padding: 15px 20px;
             border-radius: 6px;
             margin-bottom: 20px;
-        }
+        }}
 
-        .alert.info {
+        .alert.info {{
             background: rgba(0, 188, 212, 0.1);
             border: 1px solid #00bcd4;
             color: #00bcd4;
-        }
+        }}
 
-        .alert.error {
+        .alert.error {{
             background: rgba(239, 68, 68, 0.1);
             border: 1px solid #ef4444;
             color: #ef4444;
-        }
+        }}
 
-        .alert.success {
+        .alert.success {{
             background: rgba(34, 197, 94, 0.1);
             border: 1px solid #22c55e;
             color: #22c55e;
-        }
+        }}
 
         /* Utility classes */
-        .flex {
+        .flex {{
             display: flex;
-        }
+        }}
 
-        .flex-between {
+        .flex-between {{
             display: flex;
             justify-content: space-between;
             align-items: center;
-        }
+        }}
 
-        .gap-10 {
+        .gap-10 {{
             gap: 10px;
-        }
+        }}
 
-        .mt-20 {
+        .mt-20 {{
             margin-top: 20px;
-        }
+        }}
 
-        .mb-20 {
+        .mb-20 {{
             margin-bottom: 20px;
-        }
+        }}
     </style>
     """
 
@@ -856,6 +967,7 @@ def _get_nav_html(active_page: str = "home") -> str:
         ("tcp", "TCP Commands", "/tcp-commands"),
         ("automator", "Automator Macros", "/automator-macros"),
         ("mapping", "Command Mapping", "/command-mapping"),
+        ("settings", "Settings", "/settings"),
     ]
 
     nav_items = ""
@@ -1529,6 +1641,140 @@ async def command_mapping_page():
     return _get_base_html("Command Mapping", content, "mapping")
 
 
+@app.get("/settings", response_class=HTMLResponse)
+async def settings_page():
+    """Settings page with theme toggle and config backup."""
+    global config_data
+
+    theme = config_data.get("theme", "dark")
+    is_light = theme == "light"
+
+    parts = []
+    parts.append("<!DOCTYPE html>")
+    parts.append("<html><head>")
+    parts.append("<title>Settings - Elliott's Sony Automator Controls</title>")
+    parts.append(_get_base_styles())
+    parts.append("</head><body>")
+    parts.append(_get_nav_html("settings"))
+    parts.append("<h1>Settings</h1>")
+
+    # Theme toggle styles
+    parts.append("<style>")
+    parts.append("  .theme-toggle { display: flex; align-items: center; gap: 12px; margin: 16px 0; }")
+    parts.append("  .theme-toggle-label { font-size: 14px; min-width: 50px; }")
+    parts.append("  .toggle-switch { position: relative; width: 50px; height: 26px; }")
+    parts.append("  .toggle-switch input { opacity: 0; width: 0; height: 0; }")
+    parts.append("  .toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #30363d; border-radius: 26px; transition: 0.3s; }")
+    parts.append("  .toggle-slider:before { position: absolute; content: ''; height: 20px; width: 20px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.3s; }")
+    parts.append("  .toggle-switch input:checked + .toggle-slider { background: #00bcd4; }")
+    parts.append("  .toggle-switch input:checked + .toggle-slider:before { transform: translateX(24px); }")
+    parts.append("</style>")
+
+    # General section
+    parts.append("<fieldset><legend>General</legend>")
+    parts.append('<div class="theme-toggle">')
+    parts.append('<span class="theme-toggle-label">Dark</span>')
+    parts.append(f'<label class="toggle-switch"><input type="checkbox" id="theme-toggle" {"checked" if is_light else ""} onchange="toggleTheme()" /><span class="toggle-slider"></span></label>')
+    parts.append('<span class="theme-toggle-label">Light</span>')
+    parts.append('</div>')
+    parts.append(f"<p><strong>Server Port:</strong> <code>{effective_port()}</code> (change via GUI launcher)</p>")
+    parts.append(f"<p><strong>Version:</strong> <code>{__version__}</code></p>")
+    parts.append(f"<p><strong>Config file:</strong> <code>{CONFIG_FILE}</code></p>")
+    parts.append("</fieldset>")
+
+    # Config Import/Export section
+    parts.append("<fieldset><legend>Config Backup</legend>")
+    parts.append("<p>Export your current configuration or import a previously saved config.</p>")
+    parts.append('<button type="button" onclick="exportConfig()">Export Config</button>')
+    parts.append('<input type="file" id="import-file" accept=".json" style="display:none;" onchange="importConfig()" />')
+    parts.append('<button type="button" onclick="document.getElementById(\'import-file\').click()">Import Config</button>')
+    parts.append('<pre id="import-output"></pre>')
+    parts.append("</fieldset>")
+
+    # Updates section
+    parts.append("<fieldset><legend>Updates</legend>")
+    parts.append(f"<p>Current version: <code>{__version__}</code></p>")
+    parts.append('<button type="button" onclick="checkUpdates()">Check GitHub for latest release</button>')
+    parts.append('<pre id="update-output">Not checked yet.</pre>')
+    parts.append("</fieldset>")
+
+    # JavaScript
+    parts.append("<script>")
+    parts.append("async function postJSON(url, data) {")
+    parts.append("  const res = await fetch(url, {")
+    parts.append('    method: "POST",')
+    parts.append('    headers: { "Content-Type": "application/json" },')
+    parts.append("    body: JSON.stringify(data),")
+    parts.append("  });")
+    parts.append("  return res.json();")
+    parts.append("}")
+    parts.append("async function toggleTheme() {")
+    parts.append('  const isLight = document.getElementById("theme-toggle").checked;')
+    parts.append('  const theme = isLight ? "light" : "dark";')
+    parts.append('  await postJSON("/settings", { theme });')
+    parts.append("  location.reload();")
+    parts.append("}")
+    parts.append("async function checkUpdates() {")
+    parts.append('  const out = document.getElementById("update-output");')
+    parts.append('  out.textContent = "Checking for updates...";')
+    parts.append("  try {")
+    parts.append('    const res = await fetch("/version/check");')
+    parts.append("    const data = await res.json();")
+    parts.append("    let msg = 'Current version: ' + data.current;")
+    parts.append("    if (data.latest) {")
+    parts.append("      msg += '\\nLatest release: ' + data.latest;")
+    parts.append("    }")
+    parts.append("    msg += '\\n\\n' + data.message;")
+    parts.append("    if (data.release_url && !data.up_to_date) {")
+    parts.append("      msg += '\\n\\nDownload: ' + data.release_url;")
+    parts.append("    }")
+    parts.append("    out.textContent = msg;")
+    parts.append("  } catch (e) {")
+    parts.append("    out.textContent = 'Version check failed: ' + e;")
+    parts.append("  }")
+    parts.append("}")
+    parts.append("async function exportConfig() {")
+    parts.append("  try {")
+    parts.append('    const res = await fetch("/config/export");')
+    parts.append("    const config = await res.json();")
+    parts.append("    const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });")
+    parts.append("    const url = URL.createObjectURL(blob);")
+    parts.append("    const a = document.createElement('a');")
+    parts.append("    a.href = url;")
+    parts.append("    a.download = 'sony_automator_config.json';")
+    parts.append("    a.click();")
+    parts.append("    URL.revokeObjectURL(url);")
+    parts.append('    document.getElementById("import-output").textContent = "Config exported successfully!";')
+    parts.append("  } catch (e) {")
+    parts.append('    document.getElementById("import-output").textContent = "Export failed: " + e;')
+    parts.append("  }")
+    parts.append("}")
+    parts.append("async function importConfig() {")
+    parts.append('  const fileInput = document.getElementById("import-file");')
+    parts.append("  const file = fileInput.files[0];")
+    parts.append("  if (!file) return;")
+    parts.append("  try {")
+    parts.append("    const text = await file.text();")
+    parts.append("    const config = JSON.parse(text);")
+    parts.append('    const res = await fetch("/config/import", {')
+    parts.append('      method: "POST",')
+    parts.append('      headers: { "Content-Type": "application/json" },')
+    parts.append("      body: JSON.stringify(config),")
+    parts.append("    });")
+    parts.append("    const data = await res.json();")
+    parts.append('    document.getElementById("import-output").textContent = data.message || "Config imported!";')
+    parts.append("    setTimeout(() => location.reload(), 2000);")
+    parts.append("  } catch (e) {")
+    parts.append('    document.getElementById("import-output").textContent = "Import failed: " + e;')
+    parts.append("  }")
+    parts.append("}")
+    parts.append("checkUpdates();")
+    parts.append("</script>")
+    parts.append("</body></html>")
+
+    return HTMLResponse("".join(parts))
+
+
 # API Endpoints
 @app.get("/api/status")
 async def api_status():
@@ -1573,18 +1819,23 @@ async def api_update_config(config_update: ConfigUpdate):
     # Update config
     if config_update.tcp_listeners is not None:
         config_data["tcp_listeners"] = [l.dict() for l in config_update.tcp_listeners]
+        log_event("Config", f"Updated TCP listeners ({len(config_update.tcp_listeners)} listeners)")
 
     if config_update.tcp_commands is not None:
         config_data["tcp_commands"] = [c.dict() for c in config_update.tcp_commands]
+        log_event("Config", f"Updated TCP commands ({len(config_update.tcp_commands)} commands)")
 
     if config_update.automator is not None:
         config_data["automator"] = config_update.automator.dict()
+        log_event("Config", f"Updated Automator config (enabled: {config_update.automator.enabled})")
 
     if config_update.command_mappings is not None:
         config_data["command_mappings"] = [m.dict() for m in config_update.command_mappings]
+        log_event("Config", f"Updated command mappings ({len(config_update.command_mappings)} mappings)")
 
     if config_update.web_port is not None:
         config_data["web_port"] = config_update.web_port
+        log_event("Config", f"Updated web port to {config_update.web_port}")
 
     # Save config
     save_config(config_data)
@@ -1600,6 +1851,132 @@ async def api_update_config(config_update: ConfigUpdate):
 async def api_get_config():
     """Get current configuration."""
     return config_data
+
+
+@app.get("/health")
+async def health():
+    """Health check endpoint."""
+    return {
+        "status": "ok",
+        "version": __version__,
+        "port": effective_port()
+    }
+
+
+@app.get("/events")
+async def get_events():
+    """Get recent command/event log entries."""
+    return {"events": COMMAND_LOG[-100:]}
+
+
+@app.get("/settings/json")
+async def get_settings_json():
+    """Get current settings as JSON."""
+    return {
+        "port": effective_port(),
+        "raw_port": config_data.get("web_port", 3114),
+        "theme": config_data.get("theme", "dark"),
+        "config_path": str(CONFIG_FILE),
+    }
+
+
+@app.post("/settings")
+async def update_settings(settings: SettingsIn):
+    """Update settings."""
+    if settings.web_port is not None:
+        config_data["web_port"] = settings.web_port
+        log_event("CONFIG", f"Web port updated to {settings.web_port}")
+    if settings.theme is not None:
+        config_data["theme"] = settings.theme
+        log_event("CONFIG", f"Theme changed to {settings.theme}")
+
+    save_config(config_data)
+
+    return {
+        "ok": True,
+        "message": "Settings updated.",
+        "port": effective_port(),
+        "theme": config_data.get("theme", "dark"),
+    }
+
+
+@app.get("/config/export")
+async def export_config():
+    """Export current configuration as JSON for backup."""
+    return config_data
+
+
+@app.post("/config/import")
+async def import_config(config: Dict[str, Any]):
+    """Import configuration from JSON backup."""
+    try:
+        # Update config_data with imported data
+        if "theme" in config:
+            config_data["theme"] = config["theme"]
+        if "web_port" in config:
+            config_data["web_port"] = config["web_port"]
+        if "tcp_listeners" in config:
+            config_data["tcp_listeners"] = config["tcp_listeners"]
+        if "tcp_commands" in config:
+            config_data["tcp_commands"] = config["tcp_commands"]
+        if "automator" in config:
+            config_data["automator"] = config["automator"]
+        if "command_mappings" in config:
+            config_data["command_mappings"] = config["command_mappings"]
+
+        save_config(config_data)
+        log_event("CONFIG", "Configuration imported successfully")
+
+        return {
+            "ok": True,
+            "message": "Configuration imported successfully. Some changes may require restart.",
+        }
+    except Exception as e:
+        logger.error(f"Config import failed: {e}")
+        raise HTTPException(status_code=400, detail=f"Import failed: {str(e)}")
+
+
+@app.get("/version/check")
+async def check_version():
+    """Check for updates against GitHub releases."""
+    current = __version__
+    try:
+        resp = requests.get(
+            "https://api.github.com/repos/YourUsername/Sony-Automator-Controls/releases/latest",
+            timeout=5
+        )
+        if resp.status_code == 404:
+            return {
+                "current": current,
+                "latest": None,
+                "up_to_date": True,
+                "message": "Repository is private or has no public releases",
+            }
+        resp.raise_for_status()
+        data = resp.json()
+        latest = data.get("tag_name", "unknown")
+        release_url = data.get("html_url", "")
+
+        # Normalize versions for comparison (remove 'v' prefix if present)
+        current_normalized = current.lstrip('v')
+        latest_normalized = latest.lstrip('v')
+        up_to_date = current_normalized == latest_normalized
+
+        return {
+            "current": current,
+            "latest": latest,
+            "up_to_date": up_to_date,
+            "release_url": release_url,
+            "message": "You are up to date" if up_to_date else "A newer version is available",
+        }
+    except requests.RequestException as e:
+        logger.error("Version check failed: %s", e)
+        return {
+            "current": current,
+            "latest": None,
+            "up_to_date": True,
+            "message": f"Version check failed: {str(e)}",
+        }
 
 
 if __name__ == "__main__":

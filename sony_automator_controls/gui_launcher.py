@@ -464,6 +464,9 @@ class SonyAutomatorGUI:
 
         logger.info("Server thread started")
 
+        # Automatically open browser after a short delay to let server start
+        self.root.after(2000, self.launch_browser)
+
     def launch_browser(self):
         """Open web interface in browser."""
         url = f"http://127.0.0.1:{self.server_port}"

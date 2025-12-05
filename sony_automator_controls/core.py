@@ -238,7 +238,19 @@ async def process_tcp_command(command: str, port: int):
     log_event("Mapping Found", f"{tcp_cmd['name']} → {mapping['automator_macro_name']}")
 
     # Trigger HTTP request to Automator
-    item_type = mapping.get("automator_macro_type", "macro")  # Default to macro if not specified
+    item_type = mapping.get("automator_macro_type")
+
+    # If type is missing from mapping (old config), try to detect it from the macro ID
+    if not item_type:
+        macros = fetch_automator_macros()
+        for macro in macros:
+            if macro.get("id") == mapping["automator_macro_id"]:
+                item_type = macro.get("type", "macro")
+                logger.info(f"Auto-detected type '{item_type}' for {mapping['automator_macro_name']}")
+                break
+        if not item_type:
+            item_type = "macro"  # Final fallback
+
     await trigger_automator_macro(mapping["automator_macro_id"], mapping["automator_macro_name"], item_type)
 
 

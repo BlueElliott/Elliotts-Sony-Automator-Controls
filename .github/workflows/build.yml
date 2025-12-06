@@ -57,26 +57,42 @@ jobs:
           echo "version: ${{ steps.version.outputs.version }}" > version.txt
           cat version.txt
 
-      - name: Build executable with PyInstaller
+      - name: Build main executable with PyInstaller
         run: pyinstaller SonyAutomatorControls.spec
 
-      - name: Verify executable exists
+      - name: Build TCP Test Client with PyInstaller
+        run: pyinstaller TCPTestClient.spec
+
+      - name: Verify executables exist
         run: |
-          $exePath = Get-ChildItem "dist\SonyAutomatorControls-*.exe" | Select-Object -First 1
-          if ($exePath) {
-            Write-Host "✓ Executable built successfully: $($exePath.Name)"
-            Get-Item $exePath | Format-List
+          $mainExe = Get-ChildItem "dist\SonyAutomatorControls-*.exe" | Select-Object -First 1
+          $tcpExe = Get-ChildItem "dist\TCPTestClient-*.exe" | Select-Object -First 1
+
+          if ($mainExe) {
+            Write-Host "✓ Main executable built successfully: $($mainExe.Name)"
+            Get-Item $mainExe | Format-List
           } else {
-            Write-Error "✗ Executable not found!"
+            Write-Error "✗ Main executable not found!"
             Get-ChildItem dist\ | Format-Table
             exit 1
           }
 
-      - name: Upload executable artifact
+          if ($tcpExe) {
+            Write-Host "✓ TCP Test Client built successfully: $($tcpExe.Name)"
+            Get-Item $tcpExe | Format-List
+          } else {
+            Write-Error "✗ TCP Test Client not found!"
+            Get-ChildItem dist\ | Format-Table
+            exit 1
+          }
+
+      - name: Upload executable artifacts
         uses: actions/upload-artifact@v4
         with:
           name: windows-executable
-          path: dist/SonyAutomatorControls-*.exe
+          path: |
+            dist/SonyAutomatorControls-*.exe
+            dist/TCPTestClient-*.exe
           retention-days: 90
 
   # ==================== BUILD PYTHON PACKAGE ====================
@@ -182,12 +198,17 @@ jobs:
 
           TCP-to-HTTP bridge for controlling Cuez Automator systems via external control devices.
 
-          ### 📦 Download
+          ### 📦 Downloads
 
-          **Download:** `SonyAutomatorControls.exe` (Portable)
+          **Main Application:** `SonyAutomatorControls-*.exe` (Portable)
           - No installation needed - fully standalone!
           - Run from any folder
           - No Python required
+
+          **TCP Test Client:** `TCPTestClient-*.exe` (Portable)
+          - Standalone TCP testing tool
+          - Send test commands to verify TCP server
+          - Debug TCP command mappings
 
           ### ✨ Features
           - TCP command listener on multiple configurable ports
@@ -228,6 +249,7 @@ jobs:
         with:
           files: |
             artifacts/windows-executable/SonyAutomatorControls-*.exe
+            artifacts/windows-executable/TCPTestClient-*.exe
           body_path: release-notes.md
           draft: false
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}

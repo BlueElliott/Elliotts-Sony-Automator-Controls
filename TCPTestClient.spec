@@ -9,7 +9,7 @@ except ImportError:
     from PyInstaller.building.api import Analysis, EXE, PYZ
 
 # Version for TCP Test Client
-VERSION = "1.0.0"
+VERSION = "1.0.3"
 
 a = Analysis(
     ['tcp_test_client.py'],

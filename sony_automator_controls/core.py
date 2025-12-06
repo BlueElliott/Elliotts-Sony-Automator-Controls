@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -24,7 +25,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Version
-__version__ = "1.0.0"
+from sony_automator_controls import __version__
 
 # Global state
 tcp_servers: Dict[int, asyncio.Server] = {}
@@ -56,6 +57,34 @@ def effective_port() -> int:
     """Get the effective port the server is running on."""
     return config_data.get("web_port", 3114)
 
+
+def _app_root() -> Path:
+    """Return the root directory of the app (for bundled exe or source)."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).parent.parent
+
+
+def _runtime_version() -> str:
+    """
+    Try to read version from version.txt next to the app, then package version.
+    Fallback to __version__ if not present.
+    """
+    try:
+        vfile = _app_root() / "version.txt"
+        if vfile.exists():
+            text = vfile.read_text(encoding="utf-8").strip()
+            if ":" in text:
+                text = text.split(":", 1)[1].strip()
+            return text
+    except Exception:
+        pass
+    # Try to get version from package
+    try:
+        return __version__
+    except Exception:
+        return "1.0.2"
+
 # Configuration file path
 CONFIG_DIR = Path.home() / ".sony_automator_controls"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -73,7 +102,7 @@ DEFAULT_CONFIG = {
         {"id": "cmd_2", "name": "Test Command 2", "tcp_trigger": "TEST2", "description": "Test command 2"}
     ],
     "automator": {
-        "url": "",
+        "url": "http://127.0.0.1:7070",
         "api_key": "",
         "enabled": False
     },
@@ -383,14 +412,12 @@ def check_automator_connection() -> dict:
     url = url.rstrip("/")
 
     try:
-        log_event("Automator Test", f"Testing connection to {url}")
+        # Test connection without logging (only log when user explicitly tests)
         response = requests.get(f"{url}/api/app/webconnection", timeout=5)
         response.raise_for_status()
         automator_status = {"connected": True, "last_check": datetime.now().isoformat(), "error": None}
-        log_event("Automator Test", "Connection successful")
     except requests.exceptions.RequestException as e:
         automator_status = {"connected": False, "last_check": datetime.now().isoformat(), "error": str(e)}
-        log_event("Automator Test", f"Connection failed: {str(e)}")
 
     return automator_status
 
@@ -760,6 +787,29 @@ def _get_base_styles() -> str:
             color: #f59e0b;
         }}
 
+        /* Play button - Elliott's style */
+        .play-btn {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 32px;
+            height: 32px;
+            background: #2196f3;
+            color: #fff;
+            border-radius: 50%;
+            text-decoration: none;
+            font-size: 14px;
+            transition: all 0.2s;
+            border: none;
+            cursor: pointer;
+        }}
+
+        .play-btn:hover {{
+            background: #1976d2;
+            transform: scale(1.1);
+            box-shadow: 0 2px 8px #2196f360;
+        }}
+
         /* Buttons - Elliott's style with transform */
         button {{
             display: inline-flex;
@@ -1043,7 +1093,7 @@ def _get_nav_html(active_page: str = "home") -> str:
     pages = [
         ("home", "Home", "/"),
         ("tcp", "TCP Commands", "/tcp-commands"),
-        ("automator", "Automator Macros", "/automator-macros"),
+        ("automator", "Automator Controls", "/automator-macros"),
         ("mapping", "Command Mapping", "/command-mapping"),
         ("settings", "Settings", "/settings"),
     ]
@@ -1064,12 +1114,13 @@ def _get_base_html(title: str, content: str, active_page: str = "home") -> str:
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>{title} - Elliott's Sony Automator Controls</title>
+        <title>{title} - Elliott's Sony Automator Controls v{_runtime_version()}</title>
         {_get_base_styles()}
     </head>
     <body>
         {_get_nav_html(active_page)}
         <h1>Elliott's Sony Automator Controls</h1>
+        <p style="color: #888; font-size: 0.9em; margin-top: -10px;">Version {_runtime_version()}</p>
         <p>{title}</p>
         {content}
     </body>
@@ -1220,7 +1271,7 @@ async def tcp_commands_page():
     commands_html = ""
     for cmd in commands:
         commands_html += f"""
-        <div class="item">
+        <div class="item searchable-tcp-command" data-name="{cmd['name'].lower()}" data-trigger="{cmd['tcp_trigger'].lower()}" data-description="{cmd.get('description', '').lower()}">
             <div class="item-info">
                 <div class="item-title">{cmd['name']}</div>
                 <div class="item-detail">TCP Trigger: <strong>{cmd['tcp_trigger']}</strong></div>
@@ -1270,7 +1321,12 @@ async def tcp_commands_page():
     <div class="section">
         <h2>Configured Commands</h2>
         <p style="color: #888888; margin-bottom: 20px;">Define TCP commands that will be recognized by the system.</p>
-        <div class="item-list">
+
+        <div style="margin-bottom: 20px;">
+            <input type="text" id="tcpCommandSearchBox" placeholder="Search commands by name, trigger, or description..." style="width: 100%; padding: 10px 14px; font-size: 14px; border-radius: 8px;" oninput="filterTCPCommands()">
+        </div>
+
+        <div class="item-list" id="tcp-commands-list">
             {commands_html}
         </div>
         <div class="btn-row">
@@ -1391,7 +1447,45 @@ async def tcp_commands_page():
         }}
 
         function editCommand(id) {{
-            alert('Edit functionality coming soon!');
+            const commands = {json.dumps(commands)};
+            const cmd = commands.find(c => c.id === id);
+            if (!cmd) {{
+                alert('Command not found');
+                return;
+            }}
+
+            const name = prompt('Command name:', cmd.name);
+            if (name === null) return; // Cancelled
+
+            const trigger = prompt('TCP trigger string:', cmd.tcp_trigger);
+            if (trigger === null) return; // Cancelled
+
+            const description = prompt('Description (optional):', cmd.description || '');
+            if (description === null) return; // Cancelled
+
+            updateCommand(id, name, trigger, description);
+        }}
+
+        async function updateCommand(id, name, trigger, description) {{
+            const commands = {json.dumps(commands)};
+            const updatedCommands = commands.map(c => {{
+                if (c.id === id) {{
+                    return {{id: id, name: name, tcp_trigger: trigger, description: description}};
+                }}
+                return c;
+            }});
+
+            const response = await fetch('/api/config', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{tcp_commands: updatedCommands}})
+            }});
+
+            if (response.ok) {{
+                location.reload();
+            }} else {{
+                alert('Error updating command');
+            }}
         }}
 
         // TCP Capture functions
@@ -1472,6 +1566,24 @@ async def tcp_commands_page():
             statusDiv.innerHTML = '<div class="alert warning">Capture mode cancelled</div>';
             setTimeout(() => statusDiv.innerHTML = '', 3000);
         }}
+
+        function filterTCPCommands() {{
+            const searchTerm = document.getElementById('tcpCommandSearchBox').value.toLowerCase();
+            const items = document.querySelectorAll('.searchable-tcp-command');
+
+            items.forEach(item => {{
+                const name = item.getAttribute('data-name');
+                const trigger = item.getAttribute('data-trigger');
+                const description = item.getAttribute('data-description');
+                const matches = name.includes(searchTerm) || trigger.includes(searchTerm) || description.includes(searchTerm);
+
+                if (matches) {{
+                    item.style.display = 'flex';
+                }} else {{
+                    item.style.display = 'none';
+                }}
+            }});
+        }}
     </script>
     """
 
@@ -1480,7 +1592,7 @@ async def tcp_commands_page():
 
 @app.get("/automator-macros", response_class=HTMLResponse)
 async def automator_macros_page():
-    """Automator Macros page."""
+    """Automator Controls page."""
     global config_data
 
     automator_config = config_data.get("automator", {})
@@ -1544,7 +1656,7 @@ async def automator_macros_page():
                     <div class="item-title">{item_name}</div>
                 </div>
                 <div class="item-actions">
-                    <button class="success" onclick="testMacro('{item_id}', '{item_name}', '{item_type}')">Test</button>
+                    <a href="javascript:void(0)" class="play-btn" onclick="testMacro('{item_id}', '{item_name}', '{item_type}')" title="Test {item_name}">▶</a>
                 </div>
             </div>
             """
@@ -1635,15 +1747,14 @@ async def automator_macros_page():
         }
 
         async function testMacro(macroId, macroName, itemType = 'macro') {
-            if (!confirm(`Test trigger ${itemType}: ${macroName}?`)) return;
-
-            const response = await fetch(`/api/automator/trigger/${macroId}?item_type=${itemType}`, {method: 'POST'});
-
-            if (response.ok) {
-                alert(`Successfully triggered ${itemType}: ${macroName}`);
-            } else {
-                alert(`Error triggering ${itemType}: ${macroName}`);
-            }
+            // Trigger in background without blocking UI
+            fetch(`/api/automator/trigger/${macroId}?item_type=${itemType}`, {method: 'POST'})
+                .then(response => {
+                    if (!response.ok) {
+                        console.error(`Error triggering ${itemType}: ${macroName}`);
+                    }
+                })
+                .catch(err => console.error(`Error triggering ${itemType}: ${macroName}`, err));
         }
 
         function filterItems() {
@@ -1688,7 +1799,7 @@ async def automator_macros_page():
     </script>
     """
 
-    return _get_base_html("Automator Macros", content, "automator")
+    return _get_base_html("Automator Controls", content, "automator")
 
 
 @app.get("/command-mapping", response_class=HTMLResponse)
@@ -1720,7 +1831,7 @@ async def command_mapping_page():
         <h1>Command Mapping</h1>
         <div class="alert info">
             No Automator macros available. Please configure Automator integration on the
-            <a href="/automator-macros" style="color: #00bcd4;">Automator Macros page</a>.
+            <a href="/automator-macros" style="color: #00bcd4;">Automator Controls page</a>.
         </div>
         """
         return _get_base_html("Command Mapping", content, "mapping")
@@ -1755,7 +1866,7 @@ async def command_mapping_page():
                 current_value = display_text
 
         table_rows += f"""
-        <tr>
+        <tr class="searchable-mapping-row" data-tcp-name="{tcp_name.lower()}" data-tcp-trigger="{tcp_trigger.lower()}" data-automator-name="{current_value.lower()}">
             <td><strong>{tcp_name}</strong><br><span style="color: #888888; font-size: 12px;">{tcp_trigger}</span></td>
             <td>
                 <input list="macros-{tcp_id}" class="mapping-input" data-tcp-id="{tcp_id}" value="{current_value}"
@@ -1779,6 +1890,10 @@ async def command_mapping_page():
             Link incoming TCP commands to trigger specific Automator macros.
         </p>
 
+        <div style="margin-bottom: 20px;">
+            <input type="text" id="mappingSearchBox" placeholder="Search mappings by TCP command or Automator item name..." style="width: 100%; padding: 10px 14px; font-size: 14px; border-radius: 8px;" oninput="filterMappings()">
+        </div>
+
         <div class="mapping-grid">
             <table class="mapping-table">
                 <thead>
@@ -1788,7 +1903,7 @@ async def command_mapping_page():
                         <th style="text-align: center;">Action</th>
                     </tr>
                 </thead>
-                <tbody>
+                <tbody id="mappings-tbody">
                     {table_rows}
                 </tbody>
             </table>
@@ -1915,6 +2030,24 @@ async def command_mapping_page():
                 status.innerHTML = '<div class="alert success">Mapping removed!</div>';
                 setTimeout(() => status.innerHTML = '', 2000);
             }}
+        }}
+
+        function filterMappings() {{
+            const searchTerm = document.getElementById('mappingSearchBox').value.toLowerCase();
+            const rows = document.querySelectorAll('.searchable-mapping-row');
+
+            rows.forEach(row => {{
+                const tcpName = row.getAttribute('data-tcp-name');
+                const tcpTrigger = row.getAttribute('data-tcp-trigger');
+                const automatorName = row.getAttribute('data-automator-name');
+                const matches = tcpName.includes(searchTerm) || tcpTrigger.includes(searchTerm) || automatorName.includes(searchTerm);
+
+                if (matches) {{
+                    row.style.display = '';
+                }} else {{
+                    row.style.display = 'none';
+                }}
+            }});
         }}
     </script>
     """
@@ -2139,7 +2272,7 @@ async def health():
     """Health check endpoint."""
     return {
         "status": "ok",
-        "version": __version__,
+        "version": _runtime_version(),
         "port": effective_port()
     }
 
@@ -2257,7 +2390,7 @@ async def check_version():
     current = __version__
     try:
         resp = requests.get(
-            "https://api.github.com/repos/YourUsername/Sony-Automator-Controls/releases/latest",
+            "https://api.github.com/repos/BlueElliott/Elliotts-Sony-Automator-Controls/releases/latest",
             timeout=5
         )
         if resp.status_code == 404:

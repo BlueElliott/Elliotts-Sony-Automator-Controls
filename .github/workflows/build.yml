@@ -1,0 +1,236 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+concurrency:
+  group: build-release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+
+permissions:
+  contents: read
+
+jobs:
+  # ==================== BUILD WINDOWS EXECUTABLE ====================
+  build-windows-exe:
+    name: Build Windows Executable
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Extract version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${{ github.ref_name }}"
+          else
+            VERSION="dev-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Write version.txt
+        shell: bash
+        run: |
+          echo "version: ${{ steps.version.outputs.version }}" > version.txt
+          cat version.txt
+
+      - name: Build executable with PyInstaller
+        run: pyinstaller SonyAutomatorControls.spec
+
+      - name: Verify executable exists
+        run: |
+          $exePath = Get-ChildItem "dist\SonyAutomatorControls-*.exe" | Select-Object -First 1
+          if ($exePath) {
+            Write-Host "✓ Executable built successfully: $($exePath.Name)"
+            Get-Item $exePath | Format-List
+          } else {
+            Write-Error "✗ Executable not found!"
+            Get-ChildItem dist\ | Format-Table
+            exit 1
+          }
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-executable
+          path: dist/SonyAutomatorControls-*.exe
+          retention-days: 90
+
+  # ==================== BUILD PYTHON PACKAGE ====================
+  build-package:
+    name: Build Python Package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Build sdist & wheel
+        run: python -m build
+
+      - name: Check package
+        run: twine check dist/*
+
+      - name: Upload python package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package
+          path: dist/*
+          retention-days: 90
+
+  # ==================== PUBLISH TO PYPI ====================
+  publish-pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: build-package
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package
+          path: dist/
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install twine
+        run: python -m pip install --upgrade twine
+
+      - name: Publish to PyPI
+        continue-on-error: true
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -z "$TWINE_PASSWORD" ]; then
+            echo "⚠️ PYPI_API_TOKEN not set - skipping PyPI publish"
+            exit 0
+          fi
+          python -m twine upload dist/*
+
+  # ==================== CREATE GITHUB RELEASE ====================
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-windows-exe, build-package]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Display artifact structure
+        run: ls -R artifacts/
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          VERSION="${{ github.ref_name }}"
+          PREV_TAG=$(git describe --abbrev=0 --tags ${{ github.ref_name }}^ 2>/dev/null || echo "")
+
+          cat > release-notes.md << 'EOF'
+          ## Elliott's Sony Automator Controls ${{ github.ref_name }}
+
+          TCP-to-HTTP bridge for controlling Cuez Automator systems via external control devices.
+
+          ### 📦 Download
+
+          **Download:** `SonyAutomatorControls.exe` (Portable)
+          - No installation needed - fully standalone!
+          - Run from any folder
+          - No Python required
+
+          ### ✨ Features
+          - TCP command listener on multiple configurable ports
+          - Maps TCP commands to Automator HTTP API calls
+          - Controls macros, buttons, and keyboard shortcuts
+          - Web-based configuration interface
+          - Desktop GUI with system tray support
+          - Event logging and real-time monitoring
+
+          ### 🚀 Quick Start
+
+          1. Download `SonyAutomatorControls.exe`
+          2. Run the executable
+          3. Click "Open Web GUI" or visit `http://localhost:3114`
+          4. Configure your Automator URL and TCP commands
+          5. External systems can now send TCP commands to control Automator
+
+          ### 📝 Changelog
+          EOF
+
+          if [ -n "$PREV_TAG" ]; then
+            echo "" >> release-notes.md
+            echo "**Changes since $PREV_TAG:**" >> release-notes.md
+            git log $PREV_TAG..${{ github.ref_name }} --pretty=format:"- %s (%h)" >> release-notes.md
+          fi
+
+          cat >> release-notes.md << 'EOF'
+
+          ### 🐛 Issues?
+
+          Report bugs at: https://github.com/BlueElliott/Elliotts-Sony-Automator-Controls/issues
+          EOF
+
+          cat release-notes.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/windows-executable/SonyAutomatorControls-*.exe
+          body_path: release-notes.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

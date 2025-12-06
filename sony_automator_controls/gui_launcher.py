@@ -16,6 +16,15 @@ from pathlib import Path
 import psutil
 
 from sony_automator_controls import core
+from sony_automator_controls.core import _runtime_version
+
+# Set Windows app ID for taskbar icon (must be done before tkinter)
+try:
+    import ctypes
+    myappid = 'elliott.sonyautomatorcontrols.sac.1'
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+except:
+    pass  # Not on Windows or ctypes not available
 
 # Configure logging
 logging.basicConfig(
@@ -62,7 +71,7 @@ class SonyAutomatorGUI:
     def __init__(self):
         """Initialize the GUI application."""
         self.root = tk.Tk()
-        self.root.title(f"Elliott's Sony Automator Controls - v{core.__version__}")
+        self.root.title(f"Elliott's Sony Automator Controls - v{_runtime_version()}")
         self.root.geometry("750x650")
         self.root.resizable(False, False)
 
@@ -108,9 +117,28 @@ class SonyAutomatorGUI:
         self.pulse_scale = 4
         self.pulse_image = None
 
+        # Set window icon
+        self._set_window_icon()
+
         # Setup UI
         self.setup_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def _set_window_icon(self):
+        """Set the window icon from file or generate it."""
+        try:
+            # Try to load from static folder
+            icon_path = Path(__file__).parent.parent / "static" / "sac_icon.ico"
+            if icon_path.exists():
+                self.root.iconbitmap(str(icon_path))
+            else:
+                # Try relative to exe location
+                from sony_automator_controls.core import _app_root
+                icon_path = _app_root() / "static" / "sac_icon.ico"
+                if icon_path.exists():
+                    self.root.iconbitmap(str(icon_path))
+        except Exception:
+            pass  # Icon not critical
 
     def _load_fonts(self):
         """Load ITV Reem fonts for the GUI."""
@@ -216,7 +244,7 @@ class SonyAutomatorGUI:
 
         version_label = tk.Label(
             brand_frame,
-            text=f"Version {core.__version__}",
+            text=f"Version {_runtime_version()}",
             font=self.font_regular,
             bg=self.bg_dark,
             fg=self.text_gray
@@ -247,8 +275,16 @@ class SonyAutomatorGUI:
         self._draw_rounded_rect(port_card_canvas, 235, 40, 435, 95, 12, self.accent_teal)
         self.port_text_id = port_card_canvas.create_text(335, 67, text=str(self.server_port), fill=self.text_light, font=self.font_bold_32)
 
-        # Web interface URL label
-        port_card_canvas.create_text(335, 115, text=f"http://127.0.0.1:{self.server_port}/", fill=self.text_gray, font=("ITV Reem", 9))
+        # Change port button (small, rounded)
+        self._draw_rounded_rect(port_card_canvas, 275, 105, 395, 132, 14, self.bg_medium)
+        port_card_canvas.create_text(335, 118, text="Change Port", fill=self.text_gray, font=("ITV Reem", 9))
+
+        # Bind click on change port area
+        port_card_canvas.tag_bind("change_port", "<Button-1>", lambda e: self.change_port())
+        port_card_canvas.addtag_overlapping("change_port", 275, 105, 395, 132)
+        port_card_canvas.bind("<Button-1>", self._handle_port_card_click)
+        port_card_canvas.bind("<Enter>", lambda e: port_card_canvas.configure(cursor="hand2"))
+        port_card_canvas.bind("<Leave>", lambda e: port_card_canvas.configure(cursor=""))
 
         self.port_card_canvas = port_card_canvas
 
@@ -444,6 +480,36 @@ class SonyAutomatorGUI:
             self.runtime_label.config(text=runtime_str)
         self.root.after(1000, self._update_runtime)
 
+    def _handle_port_card_click(self, event):
+        """Handle clicks on the port card canvas."""
+        # Check if click is in the "Change Port" button area
+        if 275 <= event.x <= 395 and 105 <= event.y <= 132:
+            self.change_port()
+
+    def change_port(self):
+        """Open dialog to change port."""
+        from tkinter import simpledialog
+        new_port = simpledialog.askinteger(
+            "Change Port",
+            "Enter new port number:",
+            initialvalue=self.server_port,
+            minvalue=1024,
+            maxvalue=65535
+        )
+        if new_port and new_port != self.server_port:
+            # Update config
+            self.config["web_port"] = new_port
+            core.save_config(self.config)
+
+            # Update UI
+            self.port_card_canvas.itemconfig(self.port_text_id, text=str(new_port))
+            self.server_port = new_port
+
+            messagebox.showinfo(
+                "Port Changed",
+                f"Port changed to {new_port}. Please restart the application for changes to take effect."
+            )
+
     def start_server(self):
         """Start the FastAPI server."""
         if self.server_running:
@@ -516,7 +582,7 @@ class SonyAutomatorGUI:
 
             # Add initial status message
             local_ip = get_local_ip()
-            self.console_text.insert(tk.END, f"Elliott's Sony Automator Controls v{core.__version__}\n")
+            self.console_text.insert(tk.END, f"Elliott's Sony Automator Controls v{_runtime_version()}\n")
             self.console_text.insert(tk.END, "=" * 60 + "\n")
             if self.server_running:
                 self.console_text.insert(tk.END, f"✓ Server running on http://0.0.0.0:{self.server_port}\n")
@@ -579,11 +645,41 @@ class SonyAutomatorGUI:
                 pass
 
     def restart_application(self):
-        """Restart the application."""
-        messagebox.showinfo(
-            "Restart Required",
-            "To restart the server, please quit and restart the application."
-        )
+        """Perform a soft restart of the application."""
+        # Show restart notification
+        self.status_label.config(text="Restarting...", fg=self.button_orange)
+        self.root.update()
+
+        # Close console if open
+        if self.console_visible:
+            self._close_console()
+
+        # Reload configuration
+        try:
+            # Reload config from file
+            new_config = core.load_config()
+            self.config.update(new_config)
+            core.config_data.update(new_config)
+            print("[Restart] Configuration reloaded")
+        except Exception as e:
+            print(f"[Restart] Config reload error: {e}")
+
+        # Clear event log
+        core.COMMAND_LOG.clear()
+        print("[Restart] Event log cleared")
+
+        # Reset runtime counter
+        self.start_time = time.time()
+        self.runtime_label.config(text="Runtime: 0s")
+
+        # Update status
+        self.status_label.config(text="Server running", fg=self.accent_teal)
+
+        # Show completion message in console only (no popup)
+        print(f"[Restart] Soft restart completed at {time.strftime('%H:%M:%S')}")
+        print("[Restart] • Configuration reloaded")
+        print("[Restart] • Event log cleared")
+        print("[Restart] • Runtime counter reset")
 
     def minimize_to_tray(self):
         """Hide window to system tray."""

@@ -1607,14 +1607,8 @@ async def automator_macros_page():
         <form id="automatorConfigForm">
             <div class="form-group">
                 <label>Automator API URL</label>
-                <input type="text" id="automatorUrl" value="{url_value}" placeholder="http://172.26.6.2:80">
-                <p style="color: #888888; font-size: 12px; margin-top: 6px;">Enter the full URL including protocol and port (e.g., http://172.26.6.2:80)</p>
-            </div>
-            <div class="form-group">
-                <label>
-                    <input type="checkbox" id="automatorEnabled" {enabled_checked} style="width: auto; margin-right: 8px;">
-                    Enable Automator Integration
-                </label>
+                <input type="text" id="automatorUrl" value="{url_value}" placeholder="http://127.0.0.1:7070">
+                <p style="color: #888888; font-size: 12px; margin-top: 6px;">Enter the full URL including protocol and port (e.g., http://127.0.0.1:7070)</p>
             </div>
             <button type="submit" class="primary">Save Configuration</button>
             <button type="button" class="secondary" onclick="testConnection()">Test Connection</button>
@@ -1704,7 +1698,6 @@ async def automator_macros_page():
             e.preventDefault();
 
             let url = document.getElementById('automatorUrl').value.trim();
-            const enabled = document.getElementById('automatorEnabled').checked;
 
             // Ensure URL starts with http:// or https://
             if (url && !url.startsWith('http://') && !url.startsWith('https://')) {
@@ -1718,7 +1711,7 @@ async def automator_macros_page():
                     automator: {
                         url: url,
                         api_key: "",
-                        enabled: enabled
+                        enabled: true
                     }
                 })
             });

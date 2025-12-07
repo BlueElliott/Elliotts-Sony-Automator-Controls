@@ -88,6 +88,15 @@ def _runtime_version() -> str:
 # Configuration file path
 CONFIG_DIR = Path.home() / ".sony_automator_controls"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+AUTOMATOR_CACHE_FILE = CONFIG_DIR / "automator_cache.json"
+
+# Automator data cache (persisted to disk)
+automator_data_cache: Dict[str, Any] = {
+    "macros": [],
+    "buttons": [],
+    "shortcuts": [],
+    "last_updated": None
+}
 
 # Default configuration
 DEFAULT_CONFIG = {
@@ -184,6 +193,67 @@ def save_config(config: dict):
         logger.info(f"Configuration saved to {CONFIG_FILE}")
     except Exception as e:
         logger.error(f"Error saving config: {e}")
+
+
+def load_automator_cache() -> dict:
+    """Load cached Automator data from disk."""
+    global automator_data_cache
+
+    ensure_config_dir()
+
+    if AUTOMATOR_CACHE_FILE.exists():
+        try:
+            with open(AUTOMATOR_CACHE_FILE, 'r', encoding='utf-8') as f:
+                automator_data_cache = json.load(f)
+                logger.info(f"Automator cache loaded from {AUTOMATOR_CACHE_FILE}")
+                return automator_data_cache
+        except Exception as e:
+            logger.error(f"Error loading Automator cache: {e}")
+
+    return automator_data_cache
+
+
+def save_automator_cache():
+    """Save Automator data cache to disk."""
+    global automator_data_cache
+
+    ensure_config_dir()
+
+    try:
+        automator_data_cache["last_updated"] = datetime.now().isoformat()
+        with open(AUTOMATOR_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(automator_data_cache, f, indent=2)
+        logger.info(f"Automator cache saved to {AUTOMATOR_CACHE_FILE}")
+    except Exception as e:
+        logger.error(f"Error saving Automator cache: {e}")
+
+
+def merge_automator_data(new_data: dict):
+    """
+    Smart merge of new Automator data with existing cache.
+    Preserves existing items and their IDs, adds new items, removes deleted items.
+    This ensures command mappings don't break when data is updated.
+    """
+    global automator_data_cache
+
+    for key in ["macros", "buttons", "shortcuts"]:
+        if key in new_data:
+            existing_items = {item.get("id"): item for item in automator_data_cache.get(key, [])}
+            new_items = {item.get("id"): item for item in new_data.get(key, [])}
+
+            # Merge: update existing, add new
+            merged = {}
+            for item_id, item in new_items.items():
+                if item_id in existing_items:
+                    # Update existing item
+                    merged[item_id] = item
+                else:
+                    # Add new item
+                    merged[item_id] = item
+
+            automator_data_cache[key] = list(merged.values())
+
+    save_automator_cache()
 
 
 # TCP Server implementation
@@ -416,22 +486,45 @@ def check_automator_connection() -> dict:
         response = requests.get(f"{url}/api/app/webconnection", timeout=5)
         response.raise_for_status()
         automator_status = {"connected": True, "last_check": datetime.now().isoformat(), "error": None}
+    except requests.exceptions.Timeout:
+        automator_status = {"connected": False, "last_check": datetime.now().isoformat(), "error": "Connection timeout - check if Automator is running"}
+    except requests.exceptions.ConnectionError:
+        automator_status = {"connected": False, "last_check": datetime.now().isoformat(), "error": "Cannot connect - check URL and port"}
+    except requests.exceptions.HTTPError as e:
+        automator_status = {"connected": False, "last_check": datetime.now().isoformat(), "error": f"HTTP error: {e.response.status_code}"}
     except requests.exceptions.RequestException as e:
-        automator_status = {"connected": False, "last_check": datetime.now().isoformat(), "error": str(e)}
+        # Fallback for other errors - simplify message
+        error_msg = str(e).split("(")[0].strip() if "(" in str(e) else str(e)
+        automator_status = {"connected": False, "last_check": datetime.now().isoformat(), "error": error_msg[:100]}
 
     return automator_status
 
 
-def fetch_automator_macros() -> List[Dict[str, Any]]:
-    """Fetch macros, buttons, and shortcuts from Automator API."""
-    global config_data
+def fetch_automator_macros(force_refresh: bool = False, use_cache_on_failure: bool = True) -> List[Dict[str, Any]]:
+    """
+    Fetch macros, buttons, and shortcuts from Automator API.
+
+    Args:
+        force_refresh: If True, always tries to fetch from Automator. If False, returns cache immediately.
+        use_cache_on_failure: If True, returns cached data when fetch fails.
+
+    Returns:
+        List of all items (macros, buttons, shortcuts)
+    """
+    global config_data, automator_data_cache
+
+    # If not forcing refresh, just return cache (fast!)
+    if not force_refresh:
+        logger.info("Using cached Automator data (no refresh requested)")
+        return _get_cached_items()
 
     automator_config = config_data.get("automator", {})
-
-    if not automator_config.get("enabled") or not automator_config.get("url"):
-        return []
-
     url = automator_config.get("url", "").strip()
+
+    # If no URL configured, return cached data
+    if not url:
+        logger.info("No Automator URL configured, using cached data")
+        return _get_cached_items()
 
     # Ensure URL has protocol
     if url and not url.startswith('http://') and not url.startswith('https://'):
@@ -439,7 +532,10 @@ def fetch_automator_macros() -> List[Dict[str, Any]]:
 
     url = url.rstrip("/")
 
-    all_items = []
+    macros = []
+    buttons = []
+    shortcuts = []
+    fetch_success = False
 
     # Fetch macros
     try:
@@ -447,7 +543,7 @@ def fetch_automator_macros() -> List[Dict[str, Any]]:
         response.raise_for_status()
         macros = response.json()
         logger.info(f"Fetched {len(macros)} macros from Automator")
-        all_items.extend(macros)
+        fetch_success = True
     except requests.exceptions.RequestException as e:
         logger.error(f"Error fetching Automator macros: {e}")
 
@@ -457,7 +553,7 @@ def fetch_automator_macros() -> List[Dict[str, Any]]:
         response.raise_for_status()
         buttons = response.json()
         logger.info(f"Fetched {len(buttons)} buttons from Automator")
-        all_items.extend(buttons)
+        fetch_success = True
     except requests.exceptions.RequestException as e:
         logger.error(f"Error fetching Automator buttons: {e}")
 
@@ -484,10 +580,36 @@ def fetch_automator_macros() -> List[Dict[str, Any]]:
 
             shortcut["title"] = " + ".join(key_parts)
 
-        all_items.extend(shortcuts)
+        fetch_success = True
     except requests.exceptions.RequestException as e:
         logger.error(f"Error fetching Automator shortcuts: {e}")
 
+    # If we successfully fetched any data, merge with cache
+    if fetch_success:
+        new_data = {
+            "macros": macros,
+            "buttons": buttons,
+            "shortcuts": shortcuts
+        }
+        merge_automator_data(new_data)
+        logger.info("Merged new Automator data with cache")
+        return _get_cached_items()
+
+    # If fetch failed and we should use cache, return cached data
+    if use_cache_on_failure:
+        logger.info("Using cached Automator data (fetch failed)")
+        return _get_cached_items()
+
+    return []
+
+
+def _get_cached_items() -> List[Dict[str, Any]]:
+    """Get all items from cache as a flat list."""
+    global automator_data_cache
+    all_items = []
+    all_items.extend(automator_data_cache.get("macros", []))
+    all_items.extend(automator_data_cache.get("buttons", []))
+    all_items.extend(automator_data_cache.get("shortcuts", []))
     return all_items
 
 
@@ -501,6 +623,10 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Sony Automator Controls...")
     log_event("System", f"Starting Elliott's Sony Automator Controls v{__version__}")
     config_data = load_config()
+
+    # Load cached Automator data
+    load_automator_cache()
+    log_event("System", "Loaded cached Automator data")
 
     # Start TCP servers for enabled listeners
     for listener in config_data.get("tcp_listeners", []):
@@ -792,8 +918,9 @@ def _get_base_styles() -> str:
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            width: 32px;
-            height: 32px;
+            width: 36px;
+            height: 36px;
+            padding: 0;
             background: #2196f3;
             color: #fff;
             border-radius: 50%;
@@ -802,6 +929,9 @@ def _get_base_styles() -> str:
             transition: all 0.2s;
             border: none;
             cursor: pointer;
+            line-height: 1;
+            vertical-align: middle;
+            margin: 0;
         }}
 
         .play-btn:hover {{
@@ -874,6 +1004,21 @@ def _get_base_styles() -> str:
 
         button.success:hover {{
             background: #16a34a;
+        }}
+
+        button.test-btn {{
+            background: #238636;
+            border: none;
+            color: #fff;
+            padding: 6px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+        }}
+
+        button.test-btn:hover {{
+            background: #2ea043;
         }}
 
         .btn-row {{
@@ -1601,38 +1746,41 @@ async def automator_macros_page():
     url_value = automator_config.get("url", "")
     enabled_checked = "checked" if automator_config.get("enabled") else ""
 
+    has_url = bool(url_value and url_value.strip())
+    save_btn_text = "Update Configuration" if has_url else "Save Configuration"
+    save_btn_class = "primary" if has_url else "success"
+
     config_form = f"""
     <div class="section">
         <h2>Automator Configuration</h2>
         <form id="automatorConfigForm">
             <div class="form-group">
                 <label>Automator API URL</label>
-                <input type="text" id="automatorUrl" value="{url_value}" placeholder="http://127.0.0.1:7070">
+                <input type="text" id="automatorUrl" value="{url_value}" placeholder="http://127.0.0.1:7070" oninput="updateSaveButton()">
                 <p style="color: #888888; font-size: 12px; margin-top: 6px;">Enter the full URL including protocol and port (e.g., http://127.0.0.1:7070)</p>
             </div>
-            <button type="submit" class="primary">Save Configuration</button>
+            <button type="submit" id="saveBtn" class="{save_btn_class}">{save_btn_text}</button>
             <button type="button" class="secondary" onclick="testConnection()">Test Connection</button>
         </form>
         <div id="configStatus" class="mt-20"></div>
     </div>
     """
 
-    # Fetch and organize macros/buttons/shortcuts
+    # Fetch and organize macros/buttons/shortcuts (always fetch, uses cache if offline)
     macros_list = []
     buttons_list = []
     shortcuts_list = []
 
-    if automator_config.get("enabled") and automator_config.get("url"):
-        all_items = fetch_automator_macros()
+    all_items = fetch_automator_macros()
 
-        for item in all_items:
-            item_type = item.get("type", "")
-            if item_type == "button":
-                buttons_list.append(item)
-            elif item_type == "shortcut":
-                shortcuts_list.append(item)
-            else:
-                macros_list.append(item)
+    for item in all_items:
+        item_type = item.get("type", "")
+        if item_type == "button":
+            buttons_list.append(item)
+        elif item_type == "shortcut":
+            shortcuts_list.append(item)
+        else:
+            macros_list.append(item)
 
     # Build collapsible sections
     def build_item_section(items, section_title, section_id):
@@ -1666,17 +1814,24 @@ async def automator_macros_page():
         </details>
         """
 
-    if automator_config.get("enabled") and automator_config.get("url"):
-        if not all_items:
-            content_html = '<div class="alert info">No macros, buttons, or shortcuts found or unable to connect to Automator.</div>'
-        else:
-            content_html = f"""
-            {build_item_section(macros_list, "Macros", "macros")}
-            {build_item_section(buttons_list, "Buttons", "buttons")}
-            {build_item_section(shortcuts_list, "Shortcuts", "shortcuts")}
-            """
+    if not all_items:
+        content_html = '<div class="alert info">No cached data available. Configure Automator URL and click Refresh to load macros, buttons, and shortcuts.</div>'
     else:
-        content_html = '<div class="alert info">Configure and enable Automator integration to see macros, buttons, and shortcuts.</div>'
+        # Show cache age if available
+        cache_info = ""
+        if automator_data_cache.get("last_updated"):
+            try:
+                last_updated = datetime.fromisoformat(automator_data_cache["last_updated"])
+                cache_info = f'<div class="alert info" style="margin-bottom: 15px;">Last updated: {last_updated.strftime("%Y-%m-%d %H:%M:%S")}</div>'
+            except:
+                pass
+
+        content_html = f"""
+        {cache_info}
+        {build_item_section(macros_list, "Macros", "macros")}
+        {build_item_section(buttons_list, "Buttons", "buttons")}
+        {build_item_section(shortcuts_list, "Shortcuts", "shortcuts")}
+        """
 
     macros_section = f"""
     <div class="section">
@@ -1688,69 +1843,114 @@ async def automator_macros_page():
         </div>
 
         {content_html}
-        <button class="secondary mt-20" onclick="location.reload()">Refresh</button>
+        <button id="refreshBtn" class="secondary mt-20" onclick="refreshMacros()">{"Reload Macros" if all_items else "Load Macros"}</button>
+        <div id="refreshStatus" class="mt-20"></div>
     </div>
     """
 
-    content = config_form + macros_section + """
+    content = config_form + macros_section + f"""
     <script>
-        document.getElementById('automatorConfigForm').addEventListener('submit', async (e) => {
+        const initialUrl = "{url_value}";
+
+        function updateSaveButton() {{
+            const saveBtn = document.getElementById('saveBtn');
+            const currentUrl = document.getElementById('automatorUrl').value.trim();
+
+            if (!currentUrl) {{
+                saveBtn.textContent = 'Save Configuration';
+                saveBtn.className = 'success';
+            }} else if (currentUrl !== initialUrl) {{
+                saveBtn.textContent = 'Update Configuration';
+                saveBtn.className = 'primary';
+            }} else {{
+                saveBtn.textContent = 'Update Configuration';
+                saveBtn.className = 'primary';
+            }}
+        }}
+
+        document.getElementById('automatorConfigForm').addEventListener('submit', async (e) => {{
             e.preventDefault();
 
             let url = document.getElementById('automatorUrl').value.trim();
 
             // Ensure URL starts with http:// or https://
-            if (url && !url.startsWith('http://') && !url.startsWith('https://')) {
+            if (url && !url.startsWith('http://') && !url.startsWith('https://')) {{
                 url = 'http://' + url;
-            }
+            }}
 
-            const response = await fetch('/api/config', {
+            const response = await fetch('/api/config', {{
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    automator: {
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{
+                    automator: {{
                         url: url,
                         api_key: "",
                         enabled: true
-                    }
-                })
-            });
+                    }}
+                }})
+            }});
 
             const status = document.getElementById('configStatus');
-            if (response.ok) {
+            if (response.ok) {{
                 status.innerHTML = '<div class="alert success">Configuration saved successfully!</div>';
                 setTimeout(() => location.reload(), 1500);
-            } else {
+            }} else {{
                 status.innerHTML = '<div class="alert error">Error saving configuration.</div>';
-            }
-        });
+            }}
+        }});
 
-        async function testConnection() {
+        async function testConnection() {{
             const status = document.getElementById('configStatus');
             status.innerHTML = '<div class="alert info">Testing connection...</div>';
 
             const response = await fetch('/api/automator/test');
             const result = await response.json();
 
-            if (result.connected) {
+            if (result.connected) {{
                 status.innerHTML = '<div class="alert success">Connection successful!</div>';
-            } else {
-                status.innerHTML = `<div class="alert error">Connection failed: ${result.error}</div>`;
-            }
-        }
+            }} else {{
+                status.innerHTML = `<div class="alert error">Connection failed: ${{result.error}}</div>`;
+            }}
+        }}
 
-        async function testMacro(macroId, macroName, itemType = 'macro') {
-            // Trigger in background without blocking UI
-            fetch(`/api/automator/trigger/${macroId}?item_type=${itemType}`, {method: 'POST'})
-                .then(response => {
-                    if (!response.ok) {
-                        console.error(`Error triggering ${itemType}: ${macroName}`);
-                    }
-                })
-                .catch(err => console.error(`Error triggering ${itemType}: ${macroName}`, err));
-        }
+        async function testMacro(macroId, macroName, itemType = 'macro') {{
+            fetch(`/api/automator/trigger/${{macroId}}?item_type=${{itemType}}`, {{method: 'POST'}})
+                .then(response => {{
+                    if (!response.ok) {{
+                        console.error(`Error triggering ${{itemType}}: ${{macroName}}`);
+                    }}
+                }})
+                .catch(err => console.error(`Error triggering ${{itemType}}: ${{macroName}}`, err));
+        }}
 
-        function filterItems() {
+        async function refreshMacros() {{
+            const status = document.getElementById('refreshStatus');
+            const btn = document.getElementById('refreshBtn');
+
+            btn.disabled = true;
+            btn.textContent = 'Loading...';
+            status.innerHTML = '<div class="alert info">Refreshing data from Automator...</div>';
+
+            try {{
+                const response = await fetch('/api/automator/refresh', {{method: 'POST'}});
+                const result = await response.json();
+
+                if (result.ok) {{
+                    status.innerHTML = `<div class="alert success">${{result.message}}</div>`;
+                    setTimeout(() => location.reload(), 1000);
+                }} else {{
+                    status.innerHTML = `<div class="alert error">Failed to refresh: ${{result.error}}</div>`;
+                    btn.disabled = false;
+                    btn.textContent = 'Reload Macros';
+                }}
+            }} catch (e) {{
+                status.innerHTML = `<div class="alert error">Error: ${{e.message}}</div>`;
+                btn.disabled = false;
+                btn.textContent = 'Reload Macros';
+            }}
+        }}
+
+        function filterItems() {{
             const searchTerm = document.getElementById('searchBox').value.toLowerCase();
             const items = document.querySelectorAll('.searchable-item');
 
@@ -1758,22 +1958,21 @@ async def automator_macros_page():
             let buttonsVisible = 0;
             let shortcutsVisible = 0;
 
-            items.forEach(item => {
+            items.forEach(item => {{
                 const itemName = item.getAttribute('data-name');
                 const itemType = item.getAttribute('data-type');
                 const matches = itemName.includes(searchTerm);
 
-                if (matches) {
+                if (matches) {{
                     item.style.display = 'flex';
                     if (itemType === 'macros') macrosVisible++;
                     else if (itemType === 'buttons') buttonsVisible++;
                     else if (itemType === 'shortcuts') shortcutsVisible++;
-                } else {
+                }} else {{
                     item.style.display = 'none';
-                }
-            });
+                }}
+            }});
 
-            // Update counts
             const macrosCount = document.getElementById('macros-count');
             const buttonsCount = document.getElementById('buttons-count');
             const shortcutsCount = document.getElementById('shortcuts-count');
@@ -1782,13 +1981,12 @@ async def automator_macros_page():
             if (buttonsCount) buttonsCount.textContent = buttonsVisible;
             if (shortcutsCount) shortcutsCount.textContent = shortcutsVisible;
 
-            // Auto-expand sections with results when searching
-            if (searchTerm) {
+            if (searchTerm) {{
                 if (macrosVisible > 0) document.getElementById('macros-section').setAttribute('open', '');
                 if (buttonsVisible > 0) document.getElementById('buttons-section').setAttribute('open', '');
                 if (shortcutsVisible > 0) document.getElementById('shortcuts-section').setAttribute('open', '');
-            }
-        }
+            }}
+        }}
     </script>
     """
 
@@ -1803,11 +2001,8 @@ async def command_mapping_page():
     tcp_commands = config_data.get("tcp_commands", [])
     mappings = config_data.get("command_mappings", [])
 
-    # Fetch automator macros
-    macros = []
-    automator_config = config_data.get("automator", {})
-    if automator_config.get("enabled") and automator_config.get("url"):
-        macros = fetch_automator_macros()
+    # Fetch automator macros (always fetch, uses cache if offline)
+    macros = fetch_automator_macros()
 
     if not tcp_commands:
         content = """
@@ -1863,13 +2058,13 @@ async def command_mapping_page():
             <td><strong>{tcp_name}</strong><br><span style="color: #888888; font-size: 12px;">{tcp_trigger}</span></td>
             <td>
                 <input list="macros-{tcp_id}" class="mapping-input" data-tcp-id="{tcp_id}" value="{current_value}"
-                       placeholder="Type to search macros..." style="width: 100%; padding: 8px;">
+                       placeholder="Type to search macros..." style="width: 100%; padding: 8px;" onchange="saveMapping('{tcp_id}')">
                 <datalist id="macros-{tcp_id}">
                     {options_html}
                 </datalist>
             </td>
-            <td style="text-align: center;">
-                <button class="success" onclick="saveMapping('{tcp_id}')">Save</button>
+            <td style="text-align: center; vertical-align: middle;">
+                <button class="play-btn" onclick="testMapping('{tcp_id}')" title="Test this mapping">▶</button>
             </td>
         </tr>
         """
@@ -1901,8 +2096,6 @@ async def command_mapping_page():
                 </tbody>
             </table>
         </div>
-
-        <button class="primary mt-20" onclick="saveAllMappings()">Save All Mappings</button>
     </div>
 
     <div id="mappingStatus" class="mt-20"></div>
@@ -1913,10 +2106,13 @@ async def command_mapping_page():
         async function saveMapping(tcpId) {{
             const input = document.querySelector(`input[data-tcp-id="${{tcpId}}"]`);
             const displayValue = input.value.trim();
+            const status = document.getElementById('mappingStatus');
 
             if (!displayValue) {{
                 // Remove mapping
                 await removeMappingForTcpCommand(tcpId);
+                status.innerHTML = '<div class="alert info">Mapping removed</div>';
+                setTimeout(() => status.innerHTML = '', 2000);
                 return;
             }}
 
@@ -1927,7 +2123,8 @@ async def command_mapping_page():
             }});
 
             if (!macro) {{
-                alert('Please select a valid macro from the list');
+                status.innerHTML = '<div class="alert error">Please select a valid macro from the list</div>';
+                setTimeout(() => status.innerHTML = '', 3000);
                 return;
             }}
 
@@ -1936,6 +2133,47 @@ async def command_mapping_page():
             const macroType = macro.type || 'macro';
 
             await updateMapping(tcpId, macroId, macroName, macroType);
+            status.innerHTML = '<div class="alert success">Mapping saved</div>';
+            setTimeout(() => status.innerHTML = '', 2000);
+        }}
+
+        async function testMapping(tcpId) {{
+            const input = document.querySelector(`input[data-tcp-id="${{tcpId}}"]`);
+            const displayValue = input.value.trim();
+            const status = document.getElementById('mappingStatus');
+
+            if (!displayValue) {{
+                status.innerHTML = '<div class="alert error">No mapping configured for this command</div>';
+                setTimeout(() => status.innerHTML = '', 3000);
+                return;
+            }}
+
+            // Find the macro by matching the display text
+            const macro = macros.find(m => {{
+                const type_label = m.type ? ` [${{m.type}}]` : '';
+                return ((m.title || m.name || '') + type_label) === displayValue;
+            }});
+
+            if (!macro) {{
+                status.innerHTML = '<div class="alert error">Invalid mapping - please select from the list</div>';
+                setTimeout(() => status.innerHTML = '', 3000);
+                return;
+            }}
+
+            // Trigger the macro
+            status.innerHTML = '<div class="alert info">Testing mapping...</div>';
+            try {{
+                const response = await fetch(`/api/automator/trigger/${{macro.id}}?item_type=${{macro.type || 'macro'}}`, {{method: 'POST'}});
+                if (response.ok) {{
+                    status.innerHTML = '<div class="alert success">Mapping tested successfully!</div>';
+                }} else {{
+                    status.innerHTML = '<div class="alert error">Failed to trigger macro</div>';
+                }}
+                setTimeout(() => status.innerHTML = '', 3000);
+            }} catch (e) {{
+                status.innerHTML = `<div class="alert error">Error: ${{e.message}}</div>`;
+                setTimeout(() => status.innerHTML = '', 3000);
+            }}
         }}
 
         async function saveAllMappings() {{
@@ -2209,6 +2447,24 @@ async def api_status():
 async def api_automator_test():
     """Test Automator connection."""
     return check_automator_connection()
+
+
+@app.post("/api/automator/refresh")
+async def api_automator_refresh():
+    """Force refresh Automator data from API."""
+    try:
+        items = fetch_automator_macros(force_refresh=True)
+        return {
+            "ok": True,
+            "count": len(items),
+            "message": f"Loaded {len(items)} items from Automator"
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "message": "Failed to refresh data"
+        }
 
 
 @app.post("/api/automator/trigger/{macro_id}")

@@ -617,14 +617,23 @@ class SonyAutomatorGUI:
 
     def _close_console(self):
         """Close the console window and clean up."""
-        if self.log_handler:
+        # First, mark text widget as None to stop logging
+        if hasattr(self, 'log_handler') and self.log_handler:
+            self.log_handler.text_widget = None
             logging.getLogger().removeHandler(self.log_handler)
             self.log_handler = None
+
+        # Restore stdout/stderr
+        sys.stdout = sys.__stdout__
+        sys.stderr = sys.__stderr__
+
+        # Destroy window
         if self.console_window:
             try:
                 self.console_window.destroy()
             except:
                 pass
+
         self.console_window = None
         self.console_text = None
         self._update_console_button(False)
@@ -801,12 +810,19 @@ class TkinterLogHandler(logging.Handler):
         self.text_widget = text_widget
 
     def emit(self, record):
+        # Check if widget still exists and is valid
+        if self.text_widget is None:
+            return
         try:
+            # Additional check to ensure widget wasn't destroyed
+            if not self.text_widget.winfo_exists():
+                return
             msg = self.format(record) + '\n'
             self.text_widget.insert(tk.END, msg)
             self.text_widget.see(tk.END)
-        except:
-            pass  # Widget may be destroyed
+        except (AttributeError, tk.TclError):
+            # Widget was destroyed or became invalid
+            self.text_widget = None
 
 
 def main():

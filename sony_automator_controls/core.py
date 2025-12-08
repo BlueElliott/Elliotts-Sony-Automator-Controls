@@ -262,7 +262,7 @@ async def handle_tcp_client(reader: asyncio.StreamReader, writer: asyncio.Stream
     global tcp_capture_active, tcp_capture_result
 
     addr = writer.get_extra_info('peername')
-    logger.info(f"TCP client connected from {addr} on port {port}")
+    logger.debug(f"TCP client connected from {addr} on port {port}")
 
     # Track connection
     if port not in tcp_connections:
@@ -276,7 +276,8 @@ async def handle_tcp_client(reader: asyncio.StreamReader, writer: asyncio.Stream
                 break
 
             message = data.decode().strip()
-            logger.info(f"Received TCP command on port {port}: {message}")
+            # Only log received command, not duplicate info
+            logger.debug(f"Received TCP command on port {port}: {message}")
 
             # If capture mode is active, store the command
             if tcp_capture_active:
@@ -294,7 +295,7 @@ async def handle_tcp_client(reader: asyncio.StreamReader, writer: asyncio.Stream
     except Exception as e:
         logger.error(f"Error handling TCP client {addr}: {e}")
     finally:
-        logger.info(f"TCP client disconnected: {addr}")
+        logger.debug(f"TCP client disconnected: {addr}")
         tcp_connections[port] = [conn for conn in tcp_connections[port] if conn[0] != addr]
         writer.close()
         await writer.wait_closed()
@@ -304,7 +305,7 @@ async def process_tcp_command(command: str, port: int):
     """Process incoming TCP command and trigger corresponding HTTP action."""
     global config_data
 
-    logger.info(f"Processing TCP command: {command} from port {port}")
+    # Single log event for command received
     log_event("TCP Command", f"Received '{command}' on port {port}")
 
     # Find matching TCP command in config
@@ -315,11 +316,8 @@ async def process_tcp_command(command: str, port: int):
             break
 
     if not tcp_cmd:
-        logger.warning(f"No TCP command definition found for: {command}")
         log_event("TCP Warning", f"No definition for command '{command}'")
         return
-
-    logger.info(f"Matched TCP command: {tcp_cmd['name']} (ID: {tcp_cmd['id']})")
 
     # Find command mapping
     mapping = None
@@ -329,11 +327,10 @@ async def process_tcp_command(command: str, port: int):
             break
 
     if not mapping:
-        logger.warning(f"No mapping found for TCP command: {tcp_cmd['name']}")
         log_event("TCP Warning", f"No mapping for '{tcp_cmd['name']}'")
         return
 
-    logger.info(f"Found mapping to Automator macro: {mapping['automator_macro_name']} (ID: {mapping['automator_macro_id']})")
+    # Single log for successful mapping
     log_event("Mapping Found", f"{tcp_cmd['name']} → {mapping['automator_macro_name']}")
 
     # Trigger HTTP request to Automator
@@ -345,7 +342,7 @@ async def process_tcp_command(command: str, port: int):
         for macro in macros:
             if macro.get("id") == mapping["automator_macro_id"]:
                 item_type = macro.get("type", "macro")
-                logger.info(f"Auto-detected type '{item_type}' for {mapping['automator_macro_name']}")
+                logger.debug(f"Auto-detected type '{item_type}' for {mapping['automator_macro_name']}")
                 break
         if not item_type:
             item_type = "macro"  # Final fallback
@@ -386,12 +383,11 @@ async def trigger_automator_macro(macro_id: str, macro_name: str, item_type: str
         endpoint = f"{url}/api/macro/{macro_id}"
 
     try:
-        logger.info(f"Triggering Automator {item_type}: {macro_name} at {endpoint}")
+        # Single log event for trigger attempt
         log_event("HTTP Trigger", f"Calling {item_type}: {macro_name}")
         response = requests.get(endpoint, timeout=5)
         response.raise_for_status()
         log_event("HTTP Success", f"Triggered {item_type}: {macro_name}")
-        logger.info(f"Successfully triggered {item_type}: {macro_name}")
     except requests.exceptions.RequestException as e:
         log_event("HTTP Error", f"Failed to trigger {macro_name}: {str(e)}")
         logger.error(f"Error triggering Automator {item_type} {macro_name}: {e}")
@@ -515,7 +511,7 @@ def fetch_automator_macros(force_refresh: bool = False, use_cache_on_failure: bo
 
     # If not forcing refresh, just return cache (fast!)
     if not force_refresh:
-        logger.info("Using cached Automator data (no refresh requested)")
+        logger.debug("Using cached Automator data (no refresh requested)")
         return _get_cached_items()
 
     automator_config = config_data.get("automator", {})
@@ -597,7 +593,7 @@ def fetch_automator_macros(force_refresh: bool = False, use_cache_on_failure: bo
 
     # If fetch failed and we should use cache, return cached data
     if use_cache_on_failure:
-        logger.info("Using cached Automator data (fetch failed)")
+        logger.debug("Using cached Automator data (fetch failed)")
         return _get_cached_items()
 
     return []

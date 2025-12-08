@@ -18,11 +18,29 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Configure logging with file handler
+def _setup_logging():
+    """Setup logging with both console and file handlers."""
+    # Create logs directory in user's home
+    log_dir = Path.home() / ".sony_automator_controls" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create rotating log file (keep last 5 files, 5MB each)
+    from logging.handlers import RotatingFileHandler
+    log_file = log_dir / "sony_automator_controls.log"
+
+    # Configure root logger
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=5),
+            logging.StreamHandler()
+        ]
+    )
+    return log_file
+
+_log_file_path = _setup_logging()
 logger = logging.getLogger(__name__)
 
 # Version
@@ -2542,7 +2560,8 @@ async def health():
     return {
         "status": "ok",
         "version": _runtime_version(),
-        "port": effective_port()
+        "port": effective_port(),
+        "log_file": str(_log_file_path)
     }
 
 
@@ -2550,6 +2569,51 @@ async def health():
 async def get_events():
     """Get recent command/event log entries."""
     return {"events": COMMAND_LOG[-100:]}
+
+
+@app.get("/logs/export")
+async def export_logs():
+    """Export full log file for download."""
+    if not _log_file_path.exists():
+        raise HTTPException(status_code=404, detail="Log file not found")
+
+    try:
+        with open(_log_file_path, 'r', encoding='utf-8') as f:
+            log_content = f.read()
+
+        from fastapi.responses import Response
+        return Response(
+            content=log_content,
+            media_type="text/plain",
+            headers={
+                "Content-Disposition": f"attachment; filename=sony_automator_controls_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error reading log file: {e}")
+        raise HTTPException(status_code=500, detail=f"Error reading log file: {str(e)}")
+
+
+@app.get("/logs/view")
+async def view_logs(lines: int = 500):
+    """View last N lines of log file."""
+    if not _log_file_path.exists():
+        raise HTTPException(status_code=404, detail="Log file not found")
+
+    try:
+        with open(_log_file_path, 'r', encoding='utf-8') as f:
+            all_lines = f.readlines()
+            last_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+
+        return {
+            "log_file": str(_log_file_path),
+            "total_lines": len(all_lines),
+            "showing_lines": len(last_lines),
+            "logs": ''.join(last_lines)
+        }
+    except Exception as e:
+        logger.error(f"Error reading log file: {e}")
+        raise HTTPException(status_code=500, detail=f"Error reading log file: {str(e)}")
 
 
 @app.post("/tcp/capture/start")

@@ -43,6 +43,9 @@ MAX_LOG_ENTRIES = 200
 tcp_capture_active = False
 tcp_capture_result = None
 
+# Persistent HTTP client for connection pooling (much faster than creating new client each time)
+_http_client: Optional[httpx.AsyncClient] = None
+
 
 def log_event(kind: str, detail: str):
     """Log an event to the command log."""
@@ -351,6 +354,18 @@ async def process_tcp_command(command: str, port: int):
     await trigger_automator_macro(mapping["automator_macro_id"], mapping["automator_macro_name"], item_type)
 
 
+def _get_http_client() -> httpx.AsyncClient:
+    """Get or create persistent HTTP client with connection pooling."""
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(
+            timeout=5.0,
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
+            http2=False  # HTTP/1.1 is faster for simple requests
+        )
+    return _http_client
+
+
 async def trigger_automator_macro(macro_id: str, macro_name: str, item_type: str = "macro"):
     """Trigger an Automator macro, button, or shortcut via HTTP."""
     global config_data
@@ -387,10 +402,10 @@ async def trigger_automator_macro(macro_id: str, macro_name: str, item_type: str
         # Single log event for trigger attempt
         log_event("HTTP Trigger", f"Calling {item_type}: {macro_name}")
 
-        # Use async HTTP client for non-blocking requests
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(endpoint)
-            response.raise_for_status()
+        # Use persistent HTTP client with connection pooling for maximum speed
+        client = _get_http_client()
+        response = await client.get(endpoint)
+        response.raise_for_status()
 
         log_event("HTTP Success", f"Triggered {item_type}: {macro_name}")
     except (httpx.RequestError, httpx.HTTPStatusError) as e:
@@ -639,6 +654,10 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    global _http_client
+    if _http_client:
+        await _http_client.aclose()
+        _http_client = None
     logger.info("Shutting down Sony Automator Controls...")
     log_event("System", "Shutting down server")
     # Stop all TCP servers

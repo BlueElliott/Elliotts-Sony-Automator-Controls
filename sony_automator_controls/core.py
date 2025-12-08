@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Any
 from contextlib import asynccontextmanager
 
 import requests
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -385,10 +386,14 @@ async def trigger_automator_macro(macro_id: str, macro_name: str, item_type: str
     try:
         # Single log event for trigger attempt
         log_event("HTTP Trigger", f"Calling {item_type}: {macro_name}")
-        response = requests.get(endpoint, timeout=5)
-        response.raise_for_status()
+
+        # Use async HTTP client for non-blocking requests
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(endpoint)
+            response.raise_for_status()
+
         log_event("HTTP Success", f"Triggered {item_type}: {macro_name}")
-    except requests.exceptions.RequestException as e:
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
         log_event("HTTP Error", f"Failed to trigger {macro_name}: {str(e)}")
         logger.error(f"Error triggering Automator {item_type} {macro_name}: {e}")
 

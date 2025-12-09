@@ -1,4 +1,4 @@
 """Sony Automator Controls - TCP to HTTP command bridge for Sony devices."""
 
-__version__ = "1.0.8"
+__version__ = "1.1.0"
 __app_name__ = "Sony Automator Controls"

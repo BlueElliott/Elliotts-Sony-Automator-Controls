@@ -112,31 +112,21 @@ CONFIG_DIR = Path.home() / ".sony_automator_controls"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 AUTOMATOR_CACHE_FILE = CONFIG_DIR / "automator_cache.json"
 
-# Automator data cache (persisted to disk)
+# Automator data cache (persisted to disk) - now stores per Automator
 automator_data_cache: Dict[str, Any] = {
-    "macros": [],
-    "buttons": [],
-    "shortcuts": [],
-    "last_updated": None
+    # Structure: {"automator_id": {"macros": [], "buttons": [], "shortcuts": [], "last_updated": None}}
 }
 
-# Default configuration
+# Default configuration (v1.1.0 with multi-Automator support)
 DEFAULT_CONFIG = {
     "version": __version__,
+    "config_version": "1.1.0",
     "theme": "dark",
     "web_port": 3114,
-    "tcp_listeners": [
-        {"port": 9001, "name": "Default TCP Listener", "enabled": True}
-    ],
-    "tcp_commands": [
-        {"id": "cmd_1", "name": "Test Command 1", "tcp_trigger": "TEST1", "description": "Test command 1"},
-        {"id": "cmd_2", "name": "Test Command 2", "tcp_trigger": "TEST2", "description": "Test command 2"}
-    ],
-    "automator": {
-        "url": "http://127.0.0.1:7070",
-        "api_key": "",
-        "enabled": False
-    },
+    "first_run": True,  # New: detect first-run for welcome experience
+    "tcp_listeners": [],  # Empty by default for first-run
+    "tcp_commands": [],  # Empty by default for first-run
+    "automators": [],  # New: array of Automator configurations
     "command_mappings": []
 }
 
@@ -156,6 +146,8 @@ class TCPCommand(BaseModel):
 
 
 class AutomatorConfig(BaseModel):
+    id: str  # New: unique ID for each Automator
+    name: str  # New: user-friendly name
     url: str
     api_key: str = ""
     enabled: bool
@@ -163,16 +155,19 @@ class AutomatorConfig(BaseModel):
 
 class CommandMapping(BaseModel):
     tcp_command_id: str
+    automator_id: str  # New: which Automator to target
     automator_macro_id: str
     automator_macro_name: str = ""
+    item_type: str = "macro"  # macro, button, or shortcut
 
 
 class ConfigUpdate(BaseModel):
     tcp_listeners: Optional[List[TCPListener]] = None
     tcp_commands: Optional[List[TCPCommand]] = None
-    automator: Optional[AutomatorConfig] = None
+    automators: Optional[List[AutomatorConfig]] = None  # Updated: now list
     command_mappings: Optional[List[CommandMapping]] = None
     web_port: Optional[int] = None
+    first_run: Optional[bool] = None  # New: for dismissing welcome
 
 
 class SettingsIn(BaseModel):
@@ -186,6 +181,55 @@ def ensure_config_dir():
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def migrate_config_to_v1_1_0(old_config: dict) -> dict:
+    """Migrate configuration from v1.0.x to v1.1.0."""
+    import uuid
+
+    logger.info("Migrating configuration from v1.0.x to v1.1.0...")
+
+    new_config = DEFAULT_CONFIG.copy()
+
+    # Keep existing settings
+    new_config["version"] = __version__
+    new_config["config_version"] = "1.1.0"
+    new_config["theme"] = old_config.get("theme", "dark")
+    new_config["web_port"] = old_config.get("web_port", 3114)
+    new_config["tcp_listeners"] = old_config.get("tcp_listeners", [])
+    new_config["tcp_commands"] = old_config.get("tcp_commands", [])
+
+    # Migrate old single automator to automators array
+    old_automator = old_config.get("automator", {})
+    if old_automator and old_automator.get("url"):
+        automator_id = f"auto_{uuid.uuid4().hex[:8]}"
+        new_config["automators"] = [{
+            "id": automator_id,
+            "name": "Primary Automator",
+            "url": old_automator.get("url", ""),
+            "api_key": old_automator.get("api_key", ""),
+            "enabled": old_automator.get("enabled", False)
+        }]
+
+        # Migrate command mappings to include automator_id
+        old_mappings = old_config.get("command_mappings", [])
+        new_mappings = []
+        for mapping in old_mappings:
+            new_mapping = mapping.copy()
+            new_mapping["automator_id"] = automator_id  # Link to migrated Automator
+            if "item_type" not in new_mapping:
+                new_mapping["item_type"] = "macro"
+            new_mappings.append(new_mapping)
+        new_config["command_mappings"] = new_mappings
+    else:
+        new_config["automators"] = []
+        new_config["command_mappings"] = []
+
+    # Mark as not first run if had config
+    new_config["first_run"] = False
+
+    logger.info("Configuration migration complete")
+    return new_config
+
+
 def load_config() -> dict:
     """Load configuration from file."""
     ensure_config_dir()
@@ -195,6 +239,13 @@ def load_config() -> dict:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 config = json.load(f)
                 logger.info(f"Configuration loaded from {CONFIG_FILE}")
+
+                # Check if migration is needed (v1.0.x to v1.1.0)
+                config_version = config.get("config_version", "1.0.0")
+                if config_version < "1.1.0" or "automator" in config:
+                    config = migrate_config_to_v1_1_0(config)
+                    save_config(config)  # Save migrated config
+
                 return config
         except Exception as e:
             logger.error(f"Error loading config: {e}")
@@ -236,13 +287,12 @@ def load_automator_cache() -> dict:
 
 
 def save_automator_cache():
-    """Save Automator data cache to disk."""
+    """Save Automator data cache to disk (now per-Automator structure)."""
     global automator_data_cache
 
     ensure_config_dir()
 
     try:
-        automator_data_cache["last_updated"] = datetime.now().isoformat()
         with open(AUTOMATOR_CACHE_FILE, 'w', encoding='utf-8') as f:
             json.dump(automator_data_cache, f, indent=2)
         logger.info(f"Automator cache saved to {AUTOMATOR_CACHE_FILE}")
@@ -250,17 +300,35 @@ def save_automator_cache():
         logger.error(f"Error saving Automator cache: {e}")
 
 
-def merge_automator_data(new_data: dict):
+def get_automator_cache(automator_id: str) -> dict:
+    """Get cache for a specific Automator."""
+    global automator_data_cache
+
+    if automator_id not in automator_data_cache:
+        automator_data_cache[automator_id] = {
+            "macros": [],
+            "buttons": [],
+            "shortcuts": [],
+            "last_updated": None
+        }
+
+    return automator_data_cache[automator_id]
+
+
+def merge_automator_data(automator_id: str, new_data: dict):
     """
-    Smart merge of new Automator data with existing cache.
+    Smart merge of new Automator data with existing cache for a specific Automator.
     Preserves existing items and their IDs, adds new items, removes deleted items.
     This ensures command mappings don't break when data is updated.
     """
     global automator_data_cache
 
+    # Get or create cache for this Automator
+    cache = get_automator_cache(automator_id)
+
     for key in ["macros", "buttons", "shortcuts"]:
         if key in new_data:
-            existing_items = {item.get("id"): item for item in automator_data_cache.get(key, [])}
+            existing_items = {item.get("id"): item for item in cache.get(key, [])}
             new_items = {item.get("id"): item for item in new_data.get(key, [])}
 
             # Merge: update existing, add new
@@ -273,9 +341,29 @@ def merge_automator_data(new_data: dict):
                     # Add new item
                     merged[item_id] = item
 
-            automator_data_cache[key] = list(merged.values())
+            cache[key] = list(merged.values())
 
+    cache["last_updated"] = datetime.now().isoformat()
+    automator_data_cache[automator_id] = cache
     save_automator_cache()
+
+
+def get_automator_by_id(automator_id: str) -> Optional[dict]:
+    """Get Automator configuration by ID."""
+    global config_data
+
+    automators = config_data.get("automators", [])
+    for automator in automators:
+        if automator.get("id") == automator_id:
+            return automator
+
+    return None
+
+
+def get_all_automators() -> List[dict]:
+    """Get all Automator configurations."""
+    global config_data
+    return config_data.get("automators", [])
 
 
 # TCP Server implementation
@@ -352,15 +440,21 @@ async def process_tcp_command(command: str, port: int):
         log_event("TCP Warning", f"No mapping for '{tcp_cmd['name']}'")
         return
 
+    # Get automator_id from mapping
+    automator_id = mapping.get("automator_id")
+    if not automator_id:
+        log_event("Mapping Error", f"No Automator specified for '{tcp_cmd['name']}'")
+        return
+
     # Single log for successful mapping
     log_event("Mapping Found", f"{tcp_cmd['name']} → {mapping['automator_macro_name']}")
 
     # Trigger HTTP request to Automator
-    item_type = mapping.get("automator_macro_type")
+    item_type = mapping.get("item_type") or mapping.get("automator_macro_type")
 
     # If type is missing from mapping (old config), try to detect it from the macro ID
     if not item_type:
-        macros = fetch_automator_macros()
+        macros = fetch_automator_macros(automator_id)
         for macro in macros:
             if macro.get("id") == mapping["automator_macro_id"]:
                 item_type = macro.get("type", "macro")
@@ -369,7 +463,7 @@ async def process_tcp_command(command: str, port: int):
         if not item_type:
             item_type = "macro"  # Final fallback
 
-    await trigger_automator_macro(mapping["automator_macro_id"], mapping["automator_macro_name"], item_type)
+    await trigger_automator_macro(mapping["automator_macro_id"], mapping["automator_macro_name"], item_type, automator_id)
 
 
 def _get_http_client() -> httpx.AsyncClient:
@@ -384,22 +478,38 @@ def _get_http_client() -> httpx.AsyncClient:
     return _http_client
 
 
-async def trigger_automator_macro(macro_id: str, macro_name: str, item_type: str = "macro"):
+async def trigger_automator_macro(macro_id: str, macro_name: str, item_type: str = "macro", automator_id: Optional[str] = None):
     """Trigger an Automator macro, button, or shortcut via HTTP."""
     global config_data
 
-    automator_config = config_data.get("automator", {})
+    # Get Automator config
+    if automator_id:
+        automator_config = get_automator_by_id(automator_id)
+    else:
+        # If no ID provided, use first/only Automator
+        automators = get_all_automators()
+        if len(automators) == 1:
+            automator_config = automators[0]
+        else:
+            log_event("Automator Error", "No Automator specified")
+            logger.error("No Automator specified for trigger")
+            return
+
+    if not automator_config:
+        log_event("Automator Error", f"Automator {automator_id} not found")
+        logger.error(f"Automator {automator_id} not found")
+        return
 
     if not automator_config.get("enabled"):
-        log_event("Automator Warning", "Integration is disabled")
-        logger.warning("Automator integration is disabled")
+        log_event("Automator Warning", f"{automator_config['name']} is disabled")
+        logger.warning(f"Automator {automator_config['name']} is disabled")
         return
 
     url = automator_config.get("url", "").strip()
 
     if not url:
-        log_event("Automator Error", "URL not configured")
-        logger.error("Automator URL not configured")
+        log_event("Automator Error", f"{automator_config['name']} URL not configured")
+        logger.error(f"Automator {automator_config['name']} URL not configured")
         return
 
     # Ensure URL has protocol
@@ -418,17 +528,17 @@ async def trigger_automator_macro(macro_id: str, macro_name: str, item_type: str
 
     try:
         # Single log event for trigger attempt
-        log_event("HTTP Trigger", f"Calling {item_type}: {macro_name}")
+        log_event("HTTP Trigger", f"[{automator_config['name']}] Calling {item_type}: {macro_name}")
 
         # Use persistent HTTP client with connection pooling for maximum speed
         client = _get_http_client()
         response = await client.get(endpoint)
         response.raise_for_status()
 
-        log_event("HTTP Success", f"Triggered {item_type}: {macro_name}")
+        log_event("HTTP Success", f"[{automator_config['name']}] Triggered {item_type}: {macro_name}")
     except (httpx.RequestError, httpx.HTTPStatusError) as e:
-        log_event("HTTP Error", f"Failed to trigger {macro_name}: {str(e)}")
-        logger.error(f"Error triggering Automator {item_type} {macro_name}: {e}")
+        log_event("HTTP Error", f"[{automator_config['name']}] Failed to trigger {macro_name}: {str(e)}")
+        logger.error(f"Error triggering Automator {item_type} {macro_name} on {automator_config['name']}: {e}")
 
 
 async def start_tcp_server(port: int):
@@ -497,15 +607,32 @@ async def restart_tcp_servers():
             await start_tcp_server(listener["port"])
 
 
-def check_automator_connection() -> dict:
-    """Check connection to Automator API."""
-    global config_data, automator_status
+def check_automator_connection(automator_id: Optional[str] = None) -> dict:
+    """Check connection to Automator API (specific Automator by ID)."""
+    global config_data
 
-    automator_config = config_data.get("automator", {})
+    # Get Automator config
+    if automator_id:
+        automator_config = get_automator_by_id(automator_id)
+    else:
+        # If no ID provided, check if there's exactly one Automator
+        automators = get_all_automators()
+        if len(automators) == 1:
+            automator_config = automators[0]
+        else:
+            return {"connected": False, "last_check": datetime.now().isoformat(), "error": "No Automator specified"}
+
+    if not automator_config:
+        return {"connected": False, "last_check": datetime.now().isoformat(), "error": "Automator not found"}
 
     if not automator_config.get("enabled") or not automator_config.get("url"):
-        automator_status = {"connected": False, "last_check": datetime.now().isoformat(), "error": "Not configured"}
-        return automator_status
+        return {
+            "connected": False,
+            "last_check": datetime.now().isoformat(),
+            "error": "Not configured",
+            "automator_id": automator_config["id"],
+            "automator_name": automator_config["name"]
+        }
 
     url = automator_config.get("url", "").strip()
 
@@ -516,29 +643,56 @@ def check_automator_connection() -> dict:
     url = url.rstrip("/")
 
     try:
-        # Test connection without logging (only log when user explicitly tests)
         response = requests.get(f"{url}/api/app/webconnection", timeout=5)
         response.raise_for_status()
-        automator_status = {"connected": True, "last_check": datetime.now().isoformat(), "error": None}
+        return {
+            "connected": True,
+            "last_check": datetime.now().isoformat(),
+            "error": None,
+            "automator_id": automator_config["id"],
+            "automator_name": automator_config["name"]
+        }
     except requests.exceptions.Timeout:
-        automator_status = {"connected": False, "last_check": datetime.now().isoformat(), "error": "Connection timeout - check if Automator is running"}
+        return {
+            "connected": False,
+            "last_check": datetime.now().isoformat(),
+            "error": "Connection timeout - check if Automator is running",
+            "automator_id": automator_config["id"],
+            "automator_name": automator_config["name"]
+        }
     except requests.exceptions.ConnectionError:
-        automator_status = {"connected": False, "last_check": datetime.now().isoformat(), "error": "Cannot connect - check URL and port"}
+        return {
+            "connected": False,
+            "last_check": datetime.now().isoformat(),
+            "error": "Cannot connect - check URL and port",
+            "automator_id": automator_config["id"],
+            "automator_name": automator_config["name"]
+        }
     except requests.exceptions.HTTPError as e:
-        automator_status = {"connected": False, "last_check": datetime.now().isoformat(), "error": f"HTTP error: {e.response.status_code}"}
+        return {
+            "connected": False,
+            "last_check": datetime.now().isoformat(),
+            "error": f"HTTP error: {e.response.status_code}",
+            "automator_id": automator_config["id"],
+            "automator_name": automator_config["name"]
+        }
     except requests.exceptions.RequestException as e:
-        # Fallback for other errors - simplify message
         error_msg = str(e).split("(")[0].strip() if "(" in str(e) else str(e)
-        automator_status = {"connected": False, "last_check": datetime.now().isoformat(), "error": error_msg[:100]}
+        return {
+            "connected": False,
+            "last_check": datetime.now().isoformat(),
+            "error": error_msg[:100],
+            "automator_id": automator_config["id"],
+            "automator_name": automator_config["name"]
+        }
 
-    return automator_status
 
-
-def fetch_automator_macros(force_refresh: bool = False, use_cache_on_failure: bool = True) -> List[Dict[str, Any]]:
+def fetch_automator_macros(automator_id: Optional[str] = None, force_refresh: bool = False, use_cache_on_failure: bool = True) -> List[Dict[str, Any]]:
     """
     Fetch macros, buttons, and shortcuts from Automator API.
 
     Args:
+        automator_id: Specific Automator ID to fetch from (None = single or first)
         force_refresh: If True, always tries to fetch from Automator. If False, returns cache immediately.
         use_cache_on_failure: If True, returns cached data when fetch fails.
 
@@ -547,18 +701,36 @@ def fetch_automator_macros(force_refresh: bool = False, use_cache_on_failure: bo
     """
     global config_data, automator_data_cache
 
+    # Get Automator config
+    if automator_id:
+        automator_config = get_automator_by_id(automator_id)
+    else:
+        # If no ID provided, use first Automator if only one exists
+        automators = get_all_automators()
+        if len(automators) == 1:
+            automator_config = automators[0]
+        elif len(automators) == 0:
+            logger.info("No Automators configured")
+            return []
+        else:
+            logger.info("Multiple Automators exist, must specify automator_id")
+            return []
+
+    if not automator_config:
+        logger.info(f"Automator {automator_id} not found")
+        return []
+
     # If not forcing refresh, just return cache (fast!)
     if not force_refresh:
-        logger.debug("Using cached Automator data (no refresh requested)")
-        return _get_cached_items()
+        logger.debug(f"Using cached Automator data for {automator_config['name']} (no refresh requested)")
+        return _get_cached_items(automator_config["id"])
 
-    automator_config = config_data.get("automator", {})
     url = automator_config.get("url", "").strip()
 
     # If no URL configured, return cached data
     if not url:
-        logger.info("No Automator URL configured, using cached data")
-        return _get_cached_items()
+        logger.info(f"No URL for Automator {automator_config['name']}, using cached data")
+        return _get_cached_items(automator_config["id"])
 
     # Ensure URL has protocol
     if url and not url.startswith('http://') and not url.startswith('https://'):
@@ -625,25 +797,25 @@ def fetch_automator_macros(force_refresh: bool = False, use_cache_on_failure: bo
             "buttons": buttons,
             "shortcuts": shortcuts
         }
-        merge_automator_data(new_data)
-        logger.info("Merged new Automator data with cache")
-        return _get_cached_items()
+        merge_automator_data(automator_config["id"], new_data)
+        logger.info(f"Merged new Automator data for {automator_config['name']} with cache")
+        return _get_cached_items(automator_config["id"])
 
     # If fetch failed and we should use cache, return cached data
     if use_cache_on_failure:
-        logger.debug("Using cached Automator data (fetch failed)")
-        return _get_cached_items()
+        logger.debug(f"Using cached Automator data for {automator_config['name']} (fetch failed)")
+        return _get_cached_items(automator_config["id"])
 
     return []
 
 
-def _get_cached_items() -> List[Dict[str, Any]]:
-    """Get all items from cache as a flat list."""
-    global automator_data_cache
+def _get_cached_items(automator_id: str) -> List[Dict[str, Any]]:
+    """Get all items from cache as a flat list for a specific Automator."""
+    cache = get_automator_cache(automator_id)
     all_items = []
-    all_items.extend(automator_data_cache.get("macros", []))
-    all_items.extend(automator_data_cache.get("buttons", []))
-    all_items.extend(automator_data_cache.get("shortcuts", []))
+    all_items.extend(cache.get("macros", []))
+    all_items.extend(cache.get("buttons", []))
+    all_items.extend(cache.get("shortcuts", []))
     return all_items
 
 

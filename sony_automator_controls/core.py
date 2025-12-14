@@ -1489,8 +1489,26 @@ async def home():
     """Home page with connection status."""
     global config_data, tcp_servers, automator_status, server_start_time
 
-    # Check Automator connection
-    automator_status = check_automator_connection()
+    # Check for first-run or no Automators configured
+    is_first_run = config_data.get("first_run", False)
+    automators = get_all_automators()
+    show_welcome = is_first_run or len(automators) == 0
+
+    # Welcome banner
+    welcome_html = ""
+    if show_welcome:
+        welcome_html = """
+        <div class="section" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-radius: 12px; padding: 30px; margin-bottom: 30px;">
+            <h2 style="color: white; margin-top: 0;">👋 Welcome to Sony Automator Controls v1.1.0!</h2>
+            <p style="font-size: 16px; margin-bottom: 20px;">Let's get you set up in a few easy steps:</p>
+            <ol style="font-size: 15px; line-height: 1.8;">
+                <li><strong>Add Automator:</strong> Go to <a href="/automator-macros" style="color: #ffd700; text-decoration: underline;">Automator Controls</a> and configure your first Automator connection</li>
+                <li><strong>Setup TCP:</strong> Configure <a href="/tcp-commands" style="color: #ffd700; text-decoration: underline;">TCP Listeners and Commands</a></li>
+                <li><strong>Create Mappings:</strong> Link commands to macros in <a href="/command-mapping" style="color: #ffd700; text-decoration: underline;">Command Mapping</a></li>
+            </ol>
+            <button onclick="dismissWelcome()" style="background: white; color: #667eea; border: none; padding: 10px 24px; border-radius: 6px; font-weight: bold; cursor: pointer; margin-top: 15px; font-size: 14px;">Got it, don't show again</button>
+        </div>
+        """
 
     # Build TCP listener status
     tcp_status_html = ""
@@ -1524,15 +1542,41 @@ async def home():
         </div>
         """
 
-    # Automator status
-    if automator_status["connected"]:
-        auto_class = "connected"
-        auto_text = "Connected"
-        auto_detail = config_data.get("automator", {}).get("url", "")
+    # Build Automator status cards (one per Automator)
+    automator_status_html = ""
+    if len(automators) == 0:
+        automator_status_html = """
+        <div class="status-card">
+            <h3>No Automators</h3>
+            <div class="status-indicator">
+                <div class="status-dot idle"></div>
+                <span class="status-text">Not configured</span>
+            </div>
+            <div class="status-detail"><a href="/automator-macros">Add Automator</a></div>
+        </div>
+        """
     else:
-        auto_class = "disconnected"
-        auto_text = "Disconnected"
-        auto_detail = automator_status.get("error", "Not configured")
+        for automator in automators:
+            status = check_automator_connection(automator["id"])
+            if status["connected"]:
+                auto_class = "connected"
+                auto_text = "Connected"
+                auto_detail = automator.get("url", "")
+            else:
+                auto_class = "disconnected"
+                auto_text = "Disconnected"
+                auto_detail = status.get("error", "Not configured")
+
+            automator_status_html += f"""
+            <div class="status-card">
+                <h3>{automator['name']}</h3>
+                <div class="status-indicator">
+                    <div class="status-dot {auto_class}"></div>
+                    <span class="status-text">{auto_text}</span>
+                </div>
+                <div class="status-detail">{auto_detail}</div>
+            </div>
+            """
 
     # Server uptime
     uptime_seconds = int(time.time() - server_start_time)
@@ -1546,6 +1590,8 @@ async def home():
         event_log_html = "<div style='color: #888;'>No events yet...</div>"
 
     content = f"""
+    {welcome_html}
+
     <h1>Dashboard</h1>
 
     <div class="section">
@@ -1553,14 +1599,7 @@ async def home():
         <div class="status-grid">
             {tcp_status_html}
 
-            <div class="status-card">
-                <h3>Automator API</h3>
-                <div class="status-indicator">
-                    <div class="status-dot {auto_class}"></div>
-                    <span class="status-text">{auto_text}</span>
-                </div>
-                <div class="status-detail">{auto_detail}</div>
-            </div>
+            {automator_status_html}
 
             <div class="status-card">
                 <h3>Server Status</h3>
@@ -1576,6 +1615,12 @@ async def home():
     <div class="section">
         <h2>Quick Stats</h2>
         <div class="status-grid">
+            <div class="status-card">
+                <h3>Automators</h3>
+                <div style="font-size: 32px; font-weight: 700; color: #00bcd4;">
+                    {len(automators)}
+                </div>
+            </div>
             <div class="status-card">
                 <h3>TCP Commands</h3>
                 <div style="font-size: 32px; font-weight: 700; color: #00bcd4;">
@@ -1606,6 +1651,15 @@ async def home():
     </div>
 
     <script>
+        async function dismissWelcome() {{
+            await fetch('/api/config', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{first_run: false}})
+            }});
+            location.reload();
+        }}
+
         // Auto-refresh every 3 seconds
         setTimeout(() => location.reload(), 3000);
     </script>
@@ -1948,40 +2002,155 @@ async def tcp_commands_page():
 @app.get("/automator-macros", response_class=HTMLResponse)
 async def automator_macros_page():
     """Automator Controls page."""
-    global config_data
+    global config_data, automator_data_cache
 
-    automator_config = config_data.get("automator", {})
+    # Get all Automators
+    automators = get_all_automators()
 
-    # Configuration form
-    url_value = automator_config.get("url", "")
-    enabled_checked = "checked" if automator_config.get("enabled") else ""
+    # Build Automator management section (at the TOP per user request)
+    automator_cards_html = ""
 
-    has_url = bool(url_value and url_value.strip())
-    save_btn_text = "Update Configuration" if has_url else "Save Configuration"
-    save_btn_class = "primary" if has_url else "success"
+    if len(automators) == 0:
+        automator_cards_html = """
+        <div class="alert info">
+            <strong>No Automators configured.</strong><br>
+            Click "Add Automator" below to connect your first Automator instance.
+        </div>
+        """
+    else:
+        for automator in automators:
+            auto_id = automator["id"]
+            auto_name = automator["name"]
+            auto_url = automator.get("url", "Not configured")
+            auto_enabled = automator.get("enabled", False)
 
-    config_form = f"""
-    <div class="section">
-        <h2>Automator Configuration</h2>
-        <form id="automatorConfigForm">
-            <div class="form-group">
-                <label>Automator API URL</label>
-                <input type="text" id="automatorUrl" value="{url_value}" placeholder="http://127.0.0.1:7070" oninput="updateSaveButton()">
-                <p style="color: #888888; font-size: 12px; margin-top: 6px;">Enter the full URL including protocol and port (e.g., http://127.0.0.1:7070)</p>
+            # Check connection status
+            status = check_automator_connection(auto_id)
+            if status["connected"]:
+                status_class = "success"
+                status_text = "✓ Connected"
+            else:
+                status_class = "error"
+                status_text = f"✗ {status.get('error', 'Disconnected')}"
+
+            # Get cache info
+            cache = get_automator_cache(auto_id)
+            total_items = len(cache.get("macros", [])) + len(cache.get("buttons", [])) + len(cache.get("shortcuts", []))
+            cache_age = ""
+            if cache.get("last_updated"):
+                try:
+                    last_updated = datetime.fromisoformat(cache["last_updated"])
+                    cache_age = last_updated.strftime("%Y-%m-%d %H:%M:%S")
+                except:
+                    cache_age = "Unknown"
+            else:
+                cache_age = "No data"
+
+            enabled_badge = '<span style="background: #4caf50; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-left: 8px;">ENABLED</span>' if auto_enabled else '<span style="background: #666; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-left: 8px;">DISABLED</span>'
+
+            automator_cards_html += f"""
+            <div class="automator-card" style="background: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 20px; margin-bottom: 15px;">
+                <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 12px;">
+                    <div>
+                        <h3 style="margin: 0 0 8px 0; font-size: 18px;">{auto_name}{enabled_badge}</h3>
+                        <p style="color: #888; margin: 4px 0; font-size: 13px;">{auto_url}</p>
+                        <p style="color: #888; margin: 4px 0; font-size: 12px;">Cached: {total_items} items | Last updated: {cache_age}</p>
+                    </div>
+                    <div class="alert {status_class}" style="margin: 0; padding: 6px 12px; font-size: 13px;">
+                        {status_text}
+                    </div>
+                </div>
+                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                    <button class="secondary" onclick="testAutomator('{auto_id}')" style="font-size: 13px; padding: 8px 16px;">Test Connection</button>
+                    <button class="secondary" onclick="refreshAutomator('{auto_id}')" style="font-size: 13px; padding: 8px 16px;">Refresh Data</button>
+                    <button class="secondary" onclick="editAutomator('{auto_id}')" style="font-size: 13px; padding: 8px 16px;">Edit</button>
+                    <button class="danger" onclick="deleteAutomator('{auto_id}', '{auto_name}')" style="font-size: 13px; padding: 8px 16px;">Delete</button>
+                </div>
+                <div id="status-{auto_id}" style="margin-top: 12px;"></div>
             </div>
-            <button type="submit" id="saveBtn" class="{save_btn_class}">{save_btn_text}</button>
-            <button type="button" class="secondary" onclick="testConnection()">Test Connection</button>
-        </form>
-        <div id="configStatus" class="mt-20"></div>
+            """
+
+    automator_management = f"""
+    <div class="section">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <h2 style="margin: 0;">Automator Connections</h2>
+            <button class="success" onclick="showAddAutomatorDialog()" style="font-size: 14px;">+ Add Automator</button>
+        </div>
+
+        {automator_cards_html}
+    </div>
+
+    <!-- Add/Edit Automator Dialog -->
+    <div id="automatorDialog" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; justify-content: center; align-items: center;">
+        <div style="background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 30px; max-width: 500px; width: 90%;">
+            <h2 id="dialogTitle">Add Automator</h2>
+            <form id="automatorForm" onsubmit="saveAutomator(event)">
+                <input type="hidden" id="automatorId">
+
+                <div class="form-group">
+                    <label>Name</label>
+                    <input type="text" id="automatorName" placeholder="e.g., Primary Automator" required>
+                </div>
+
+                <div class="form-group">
+                    <label>API URL</label>
+                    <input type="text" id="automatorUrl" placeholder="http://127.0.0.1:7070" required>
+                    <p style="color: #888; font-size: 12px; margin-top: 6px;">Enter the full URL including protocol and port</p>
+                </div>
+
+                <div class="form-group">
+                    <label>API Key (optional)</label>
+                    <input type="text" id="automatorApiKey" placeholder="Leave blank if not required">
+                </div>
+
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" id="automatorEnabled" checked>
+                        <span>Enabled</span>
+                    </label>
+                </div>
+
+                <div style="display: flex; gap: 10px; margin-top: 20px;">
+                    <button type="submit" class="success">Save</button>
+                    <button type="button" class="secondary" onclick="closeAutomatorDialog()">Cancel</button>
+                </div>
+
+                <div id="dialogStatus" style="margin-top: 15px;"></div>
+            </form>
+        </div>
     </div>
     """
 
-    # Fetch and organize macros/buttons/shortcuts (always fetch, uses cache if offline)
+    # Automator selector for viewing macros
+    automator_selector_html = ""
+    selected_automator_id = None
+
+    if len(automators) > 0:
+        # Default to first Automator
+        selected_automator_id = automators[0]["id"]
+
+        options_html = ""
+        for auto in automators:
+            options_html += f'<option value="{auto["id"]}">{auto["name"]}</option>'
+
+        automator_selector_html = f"""
+        <div style="margin-bottom: 20px; padding: 15px; background: #1e1e1e; border-radius: 8px;">
+            <label style="display: block; margin-bottom: 8px; font-weight: 600;">Select Automator to view:</label>
+            <select id="automatorSelector" onchange="switchAutomator()" style="width: 100%; padding: 10px; font-size: 14px;">
+                {options_html}
+            </select>
+        </div>
+        """
+
+    # Fetch and organize macros/buttons/shortcuts for selected Automator
     macros_list = []
     buttons_list = []
     shortcuts_list = []
 
-    all_items = fetch_automator_macros()
+    if selected_automator_id:
+        all_items = fetch_automator_macros(selected_automator_id)
+    else:
+        all_items = []
 
     for item in all_items:
         item_type = item.get("type", "")
@@ -2025,16 +2194,21 @@ async def automator_macros_page():
         """
 
     if not all_items:
-        content_html = '<div class="alert info">No cached data available. Configure Automator URL and click Refresh to load macros, buttons, and shortcuts.</div>'
+        if selected_automator_id:
+            content_html = '<div class="alert info">No cached data available. Click Refresh to load macros, buttons, and shortcuts from this Automator.</div>'
+        else:
+            content_html = '<div class="alert info">No Automators configured. Add an Automator above to get started.</div>'
     else:
         # Show cache age if available
         cache_info = ""
-        if automator_data_cache.get("last_updated"):
-            try:
-                last_updated = datetime.fromisoformat(automator_data_cache["last_updated"])
-                cache_info = f'<div class="alert info" style="margin-bottom: 15px;">Last updated: {last_updated.strftime("%Y-%m-%d %H:%M:%S")}</div>'
-            except:
-                pass
+        if selected_automator_id:
+            cache = get_automator_cache(selected_automator_id)
+            if cache.get("last_updated"):
+                try:
+                    last_updated = datetime.fromisoformat(cache["last_updated"])
+                    cache_info = f'<div class="alert info" style="margin-bottom: 15px;">Last updated: {last_updated.strftime("%Y-%m-%d %H:%M:%S")}</div>'
+                except:
+                    pass
 
         content_html = f"""
         {cache_info}
@@ -2048,83 +2222,172 @@ async def automator_macros_page():
         <h2>Available Macros, Buttons & Shortcuts</h2>
         <p style="color: #888888; margin-bottom: 12px;">Items available in your Automator system. Click to expand/collapse sections.</p>
 
+        {automator_selector_html}
+
         <div style="margin-bottom: 20px;">
             <input type="text" id="searchBox" placeholder="Search across all items..." style="width: 100%; padding: 10px 14px; font-size: 14px; border-radius: 8px;" oninput="filterItems()">
         </div>
 
         {content_html}
-        <button id="refreshBtn" class="secondary mt-20" onclick="refreshMacros()">{"Reload Macros" if all_items else "Load Macros"}</button>
+        <button id="refreshBtn" class="secondary mt-20" onclick="refreshMacros()" {'disabled' if not selected_automator_id else ''}>{"Reload Macros" if all_items else "Load Macros"}</button>
         <div id="refreshStatus" class="mt-20"></div>
     </div>
     """
 
-    content = config_form + macros_section + f"""
+    content = automator_management + macros_section + f"""
     <script>
-        const initialUrl = "{url_value}";
-
-        function updateSaveButton() {{
-            const saveBtn = document.getElementById('saveBtn');
-            const currentUrl = document.getElementById('automatorUrl').value.trim();
-
-            if (!currentUrl) {{
-                saveBtn.textContent = 'Save Configuration';
-                saveBtn.className = 'success';
-            }} else if (currentUrl !== initialUrl) {{
-                saveBtn.textContent = 'Update Configuration';
-                saveBtn.className = 'primary';
-            }} else {{
-                saveBtn.textContent = 'Update Configuration';
-                saveBtn.className = 'primary';
-            }}
+        // Automator Management Functions
+        function showAddAutomatorDialog() {{
+            document.getElementById('dialogTitle').textContent = 'Add Automator';
+            document.getElementById('automatorId').value = '';
+            document.getElementById('automatorName').value = '';
+            document.getElementById('automatorUrl').value = '';
+            document.getElementById('automatorApiKey').value = '';
+            document.getElementById('automatorEnabled').checked = true;
+            document.getElementById('dialogStatus').innerHTML = '';
+            document.getElementById('automatorDialog').style.display = 'flex';
         }}
 
-        document.getElementById('automatorConfigForm').addEventListener('submit', async (e) => {{
-            e.preventDefault();
+        function closeAutomatorDialog() {{
+            document.getElementById('automatorDialog').style.display = 'none';
+        }}
+
+        async function editAutomator(automatorId) {{
+            // Fetch current Automator config
+            const response = await fetch('/api/automators');
+            const data = await response.json();
+            const automator = data.automators.find(a => a.id === automatorId);
+
+            if (!automator) return;
+
+            document.getElementById('dialogTitle').textContent = 'Edit Automator';
+            document.getElementById('automatorId').value = automator.id;
+            document.getElementById('automatorName').value = automator.name;
+            document.getElementById('automatorUrl').value = automator.url;
+            document.getElementById('automatorApiKey').value = automator.api_key || '';
+            document.getElementById('automatorEnabled').checked = automator.enabled;
+            document.getElementById('dialogStatus').innerHTML = '';
+            document.getElementById('automatorDialog').style.display = 'flex';
+        }}
+
+        async function saveAutomator(event) {{
+            event.preventDefault();
+
+            const automatorId = document.getElementById('automatorId').value;
+            const isEdit = automatorId !== '';
 
             let url = document.getElementById('automatorUrl').value.trim();
-
-            // Ensure URL starts with http:// or https://
             if (url && !url.startsWith('http://') && !url.startsWith('https://')) {{
                 url = 'http://' + url;
             }}
 
-            const response = await fetch('/api/config', {{
-                method: 'POST',
-                headers: {{'Content-Type': 'application/json'}},
-                body: JSON.stringify({{
-                    automator: {{
-                        url: url,
-                        api_key: "",
-                        enabled: true
-                    }}
-                }})
-            }});
+            const automator = {{
+                id: automatorId || `auto_${{Date.now()}}`,
+                name: document.getElementById('automatorName').value.trim(),
+                url: url,
+                api_key: document.getElementById('automatorApiKey').value.trim(),
+                enabled: document.getElementById('automatorEnabled').checked
+            }};
 
-            const status = document.getElementById('configStatus');
-            if (response.ok) {{
-                status.innerHTML = '<div class="alert success">Configuration saved successfully!</div>';
-                setTimeout(() => location.reload(), 1500);
-            }} else {{
-                status.innerHTML = '<div class="alert error">Error saving configuration.</div>';
-            }}
-        }});
+            const endpoint = isEdit ? `/api/automators/${{automatorId}}` : '/api/automators';
+            const method = isEdit ? 'PUT' : 'POST';
 
-        async function testConnection() {{
-            const status = document.getElementById('configStatus');
-            status.innerHTML = '<div class="alert info">Testing connection...</div>';
+            try {{
+                const response = await fetch(endpoint, {{
+                    method: method,
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify(automator)
+                }});
 
-            const response = await fetch('/api/automator/test');
-            const result = await response.json();
-
-            if (result.connected) {{
-                status.innerHTML = '<div class="alert success">Connection successful!</div>';
-            }} else {{
-                status.innerHTML = `<div class="alert error">Connection failed: ${{result.error}}</div>`;
+                if (response.ok) {{
+                    document.getElementById('dialogStatus').innerHTML = '<div class="alert success">Automator saved successfully!</div>';
+                    setTimeout(() => location.reload(), 1000);
+                }} else {{
+                    const error = await response.json();
+                    document.getElementById('dialogStatus').innerHTML = `<div class="alert error">Error: ${{error.detail || 'Failed to save'}}</div>`;
+                }}
+            }} catch (e) {{
+                document.getElementById('dialogStatus').innerHTML = `<div class="alert error">Error: ${{e.message}}</div>`;
             }}
         }}
 
+        async function testAutomator(automatorId) {{
+            const statusEl = document.getElementById(`status-${{automatorId}}`);
+            statusEl.innerHTML = '<div class="alert info">Testing connection...</div>';
+
+            const response = await fetch(`/api/automator/test?automator_id=${{automatorId}}`);
+            const result = await response.json();
+
+            if (result.connected) {{
+                statusEl.innerHTML = '<div class="alert success">✓ Connection successful!</div>';
+            }} else {{
+                statusEl.innerHTML = `<div class="alert error">✗ Connection failed: ${{result.error}}</div>`;
+            }}
+
+            setTimeout(() => {{ statusEl.innerHTML = ''; }}, 3000);
+        }}
+
+        async function refreshAutomator(automatorId) {{
+            const statusEl = document.getElementById(`status-${{automatorId}}`);
+            statusEl.innerHTML = '<div class="alert info">Refreshing data...</div>';
+
+            try {{
+                const response = await fetch(`/api/automator/refresh?automator_id=${{automatorId}}`, {{method: 'POST'}});
+                const result = await response.json();
+
+                if (result.ok) {{
+                    statusEl.innerHTML = `<div class="alert success">✓ Loaded ${{result.count}} items</div>`;
+                    setTimeout(() => location.reload(), 1500);
+                }} else {{
+                    statusEl.innerHTML = `<div class="alert error">✗ Failed: ${{result.message || result.error}}</div>`;
+                }}
+            }} catch (e) {{
+                statusEl.innerHTML = `<div class="alert error">✗ Error: ${{e.message}}</div>`;
+            }}
+        }}
+
+        async function deleteAutomator(automatorId, automatorName) {{
+            if (!confirm(`Are you sure you want to delete "${{automatorName}}"?`)) {{
+                return;
+            }}
+
+            // Check for orphaned mappings first
+            const checkResponse = await fetch(`/api/automators/${{automatorId}}`, {{method: 'DELETE'}});
+            const checkData = await checkResponse.json();
+
+            if (checkData.requires_confirmation && checkData.count > 0) {{
+                const deleteAlso = confirm(`This Automator has ${{checkData.count}} command mapping(s).\\n\\nDo you want to delete these mappings as well?\\n\\nYes = Delete mappings\\nNo = Keep mappings (they will be orphaned)`);
+
+                const confirmResponse = await fetch(`/api/automators/${{automatorId}}/delete?delete_mappings=${{deleteAlso}}`, {{method: 'POST'}});
+
+                if (confirmResponse.ok) {{
+                    location.reload();
+                }} else {{
+                    alert('Error deleting Automator');
+                }}
+            }} else {{
+                // No mappings, proceed with deletion
+                const confirmResponse = await fetch(`/api/automators/${{automatorId}}/delete?delete_mappings=false`, {{method: 'POST'}});
+
+                if (confirmResponse.ok) {{
+                    location.reload();
+                }} else {{
+                    alert('Error deleting Automator');
+                }}
+            }}
+        }}
+
+        // Switch Automator for viewing macros
+        function switchAutomator() {{
+            // Just reload with selected Automator (could be improved with AJAX)
+            location.reload();
+        }}
+
+        // Test macro/button/shortcut with selected Automator
         async function testMacro(macroId, macroName, itemType = 'macro') {{
-            fetch(`/api/automator/trigger/${{macroId}}?item_type=${{itemType}}`, {{method: 'POST'}})
+            const automatorId = document.getElementById('automatorSelector')?.value || '{selected_automator_id or ""}';
+
+            fetch(`/api/automator/trigger/${{macroId}}?item_type=${{itemType}}&automator_id=${{automatorId}}`, {{method: 'POST'}})
                 .then(response => {{
                     if (!response.ok) {{
                         console.error(`Error triggering ${{itemType}}: ${{macroName}}`);
@@ -2136,20 +2399,21 @@ async def automator_macros_page():
         async function refreshMacros() {{
             const status = document.getElementById('refreshStatus');
             const btn = document.getElementById('refreshBtn');
+            const automatorId = document.getElementById('automatorSelector')?.value || '{selected_automator_id or ""}';
 
             btn.disabled = true;
             btn.textContent = 'Loading...';
             status.innerHTML = '<div class="alert info">Refreshing data from Automator...</div>';
 
             try {{
-                const response = await fetch('/api/automator/refresh', {{method: 'POST'}});
+                const response = await fetch(`/api/automator/refresh?automator_id=${{automatorId}}`, {{method: 'POST'}});
                 const result = await response.json();
 
                 if (result.ok) {{
                     status.innerHTML = `<div class="alert success">${{result.message}}</div>`;
                     setTimeout(() => location.reload(), 1000);
                 }} else {{
-                    status.innerHTML = `<div class="alert error">Failed to refresh: ${{result.error}}</div>`;
+                    status.innerHTML = `<div class="alert error">Failed to refresh: ${{result.error || result.message}}</div>`;
                     btn.disabled = false;
                     btn.textContent = 'Reload Macros';
                 }}
@@ -2210,9 +2474,7 @@ async def command_mapping_page():
 
     tcp_commands = config_data.get("tcp_commands", [])
     mappings = config_data.get("command_mappings", [])
-
-    # Fetch automator macros (always fetch, uses cache if offline)
-    macros = fetch_automator_macros()
+    automators = get_all_automators()
 
     if not tcp_commands:
         content = """
@@ -2224,15 +2486,26 @@ async def command_mapping_page():
         """
         return _get_base_html("Command Mapping", content, "mapping")
 
-    if not macros:
+    if len(automators) == 0:
         content = """
         <h1>Command Mapping</h1>
         <div class="alert info">
-            No Automator macros available. Please configure Automator integration on the
+            No Automators configured. Please configure Automator integration on the
             <a href="/automator-macros" style="color: #00bcd4;">Automator Controls page</a>.
         </div>
         """
         return _get_base_html("Command Mapping", content, "mapping")
+
+    # Build Automator options HTML
+    automator_options_html = ""
+    for auto in automators:
+        automator_options_html += f'<option value="{auto["id"]}">{auto["name"]}</option>'
+
+    # Collect all macros from all Automators (for JavaScript)
+    all_macros_by_automator = {}
+    for auto in automators:
+        macros = fetch_automator_macros(auto["id"])
+        all_macros_by_automator[auto["id"]] = macros
 
     # Build mapping table
     table_rows = ""
@@ -2248,27 +2521,44 @@ async def command_mapping_page():
                 current_mapping = m
                 break
 
-        # Build datalist options for searchable dropdown
-        options_html = ''
-        current_value = ''
-        for macro in macros:
-            macro_id = macro.get("id", "")
-            macro_name = macro.get("title", macro.get("name", "Unknown"))
-            macro_type = macro.get("type", "")
-            type_label = f" [{macro_type}]" if macro_type else ""
-            display_text = f"{macro_name}{type_label}"
-            options_html += f'<option value="{display_text}" data-id="{macro_id}" data-type="{macro_type}">'
+        # Get current automator_id and macro
+        current_automator_id = current_mapping.get("automator_id", "") if current_mapping else ""
+        current_macro_id = current_mapping.get("automator_macro_id", "") if current_mapping else ""
+        current_macro_name = current_mapping.get("automator_macro_name", "") if current_mapping else ""
+        current_item_type = current_mapping.get("item_type", "macro") if current_mapping else "macro"
 
-            # Set current value if this is the mapped macro
-            if current_mapping and current_mapping["automator_macro_id"] == macro_id:
-                current_value = display_text
+        # Build current display value
+        type_label = f" [{current_item_type}]" if current_item_type and current_macro_name else ""
+        current_value = f"{current_macro_name}{type_label}" if current_macro_name else ""
+
+        # Build datalist for this TCP command (will be dynamically updated by JavaScript)
+        options_html = ""
+        if current_automator_id:
+            macros = all_macros_by_automator.get(current_automator_id, [])
+            for macro in macros:
+                macro_id = macro.get("id", "")
+                macro_name = macro.get("title", macro.get("name", "Unknown"))
+                macro_type = macro.get("type", "")
+                type_label_opt = f" [{macro_type}]" if macro_type else ""
+                display_text = f"{macro_name}{type_label_opt}"
+                options_html += f'<option value="{display_text}" data-id="{macro_id}" data-type="{macro_type}">'
+
+        # Build Automator selector with current value
+        automator_select_html = f'<select class="automator-select" data-tcp-id="{tcp_id}" onchange="automatorChanged(\'{tcp_id}\')" style="width: 100%; padding: 8px; margin-bottom: 8px;">'
+        if not current_automator_id:
+            automator_select_html += '<option value="">-- Select Automator --</option>'
+        for auto in automators:
+            selected = 'selected' if auto["id"] == current_automator_id else ''
+            automator_select_html += f'<option value="{auto["id"]}" {selected}>{auto["name"]}</option>'
+        automator_select_html += '</select>'
 
         table_rows += f"""
         <tr class="searchable-mapping-row" data-tcp-name="{tcp_name.lower()}" data-tcp-trigger="{tcp_trigger.lower()}" data-automator-name="{current_value.lower()}">
             <td><strong>{tcp_name}</strong><br><span style="color: #888888; font-size: 12px;">{tcp_trigger}</span></td>
             <td>
+                {automator_select_html}
                 <input list="macros-{tcp_id}" class="mapping-input" data-tcp-id="{tcp_id}" value="{current_value}"
-                       placeholder="Type to search macros..." style="width: 100%; padding: 8px;" onchange="saveMapping('{tcp_id}')">
+                       placeholder="Select Automator first, then type to search..." style="width: 100%; padding: 8px;" onchange="saveMapping('{tcp_id}')">
                 <datalist id="macros-{tcp_id}">
                     {options_html}
                 </datalist>
@@ -2296,9 +2586,9 @@ async def command_mapping_page():
             <table class="mapping-table">
                 <thead>
                     <tr>
-                        <th>TCP Command</th>
-                        <th>Automator Macro</th>
-                        <th style="text-align: center;">Action</th>
+                        <th style="width: 25%;">TCP Command</th>
+                        <th style="width: 65%;">Automator & Macro</th>
+                        <th style="text-align: center; width: 10%;">Test</th>
                     </tr>
                 </thead>
                 <tbody id="mappings-tbody">
@@ -2311,12 +2601,50 @@ async def command_mapping_page():
     <div id="mappingStatus" class="mt-20"></div>
 
     <script>
-        const macros = {json.dumps(macros)};
+        // All macros organized by Automator ID
+        const macrosByAutomator = {json.dumps(all_macros_by_automator)};
+
+        // Handle Automator selection change
+        function automatorChanged(tcpId) {{
+            const automatorSelect = document.querySelector(`select.automator-select[data-tcp-id="${{tcpId}}"]`);
+            const automatorId = automatorSelect.value;
+            const input = document.querySelector(`input.mapping-input[data-tcp-id="${{tcpId}}"]`);
+            const datalist = document.getElementById(`macros-${{tcpId}}`);
+
+            // Clear current macro selection
+            input.value = '';
+
+            // Rebuild datalist options for selected Automator
+            datalist.innerHTML = '';
+            if (automatorId && macrosByAutomator[automatorId]) {{
+                const macros = macrosByAutomator[automatorId];
+                macros.forEach(macro => {{
+                    const macroName = macro.title || macro.name || 'Unknown';
+                    const macroType = macro.type || '';
+                    const typeLabel = macroType ? ` [${{macroType}}]` : '';
+                    const displayText = macroName + typeLabel;
+
+                    const option = document.createElement('option');
+                    option.value = displayText;
+                    option.setAttribute('data-id', macro.id);
+                    option.setAttribute('data-type', macroType);
+                    datalist.appendChild(option);
+                }});
+            }}
+        }}
 
         async function saveMapping(tcpId) {{
+            const automatorSelect = document.querySelector(`select.automator-select[data-tcp-id="${{tcpId}}"]`);
+            const automatorId = automatorSelect.value;
             const input = document.querySelector(`input[data-tcp-id="${{tcpId}}"]`);
             const displayValue = input.value.trim();
             const status = document.getElementById('mappingStatus');
+
+            if (!automatorId) {{
+                status.innerHTML = '<div class="alert error">Please select an Automator first</div>';
+                setTimeout(() => status.innerHTML = '', 3000);
+                return;
+            }}
 
             if (!displayValue) {{
                 // Remove mapping
@@ -2326,7 +2654,8 @@ async def command_mapping_page():
                 return;
             }}
 
-            // Find the macro by matching the display text
+            // Find the macro by matching the display text in the selected Automator
+            const macros = macrosByAutomator[automatorId] || [];
             const macro = macros.find(m => {{
                 const type_label = m.type ? ` [${{m.type}}]` : '';
                 return ((m.title || m.name || '') + type_label) === displayValue;
@@ -2342,15 +2671,23 @@ async def command_mapping_page():
             const macroName = macro.title || macro.name || '';
             const macroType = macro.type || 'macro';
 
-            await updateMapping(tcpId, macroId, macroName, macroType);
+            await updateMapping(tcpId, automatorId, macroId, macroName, macroType);
             status.innerHTML = '<div class="alert success">Mapping saved</div>';
             setTimeout(() => status.innerHTML = '', 2000);
         }}
 
         async function testMapping(tcpId) {{
+            const automatorSelect = document.querySelector(`select.automator-select[data-tcp-id="${{tcpId}}"]`);
+            const automatorId = automatorSelect.value;
             const input = document.querySelector(`input[data-tcp-id="${{tcpId}}"]`);
             const displayValue = input.value.trim();
             const status = document.getElementById('mappingStatus');
+
+            if (!automatorId) {{
+                status.innerHTML = '<div class="alert error">Please select an Automator first</div>';
+                setTimeout(() => status.innerHTML = '', 3000);
+                return;
+            }}
 
             if (!displayValue) {{
                 status.innerHTML = '<div class="alert error">No mapping configured for this command</div>';
@@ -2359,6 +2696,7 @@ async def command_mapping_page():
             }}
 
             // Find the macro by matching the display text
+            const macros = macrosByAutomator[automatorId] || [];
             const macro = macros.find(m => {{
                 const type_label = m.type ? ` [${{m.type}}]` : '';
                 return ((m.title || m.name || '') + type_label) === displayValue;
@@ -2370,10 +2708,10 @@ async def command_mapping_page():
                 return;
             }}
 
-            // Trigger the macro
+            // Trigger the macro with automator_id
             status.innerHTML = '<div class="alert info">Testing mapping...</div>';
             try {{
-                const response = await fetch(`/api/automator/trigger/${{macro.id}}?item_type=${{macro.type || 'macro'}}`, {{method: 'POST'}});
+                const response = await fetch(`/api/automator/trigger/${{macro.id}}?item_type=${{macro.type || 'macro'}}&automator_id=${{automatorId}}`, {{method: 'POST'}});
                 if (response.ok) {{
                     status.innerHTML = '<div class="alert success">Mapping tested successfully!</div>';
                 }} else {{
@@ -2427,18 +2765,19 @@ async def command_mapping_page():
             }}
         }}
 
-        async function updateMapping(tcpId, macroId, macroName, macroType) {{
+        async function updateMapping(tcpId, automatorId, macroId, macroName, macroType) {{
             const currentMappings = {json.dumps(mappings)};
 
             // Remove existing mapping for this TCP command
             const filteredMappings = currentMappings.filter(m => m.tcp_command_id !== tcpId);
 
-            // Add new mapping
+            // Add new mapping with automator_id
             filteredMappings.push({{
                 tcp_command_id: tcpId,
+                automator_id: automatorId,
                 automator_macro_id: macroId,
                 automator_macro_name: macroName,
-                automator_macro_type: macroType
+                item_type: macroType
             }});
 
             const response = await fetch('/api/config', {{
@@ -2654,20 +2993,20 @@ async def api_status():
 
 
 @app.get("/api/automator/test")
-async def api_automator_test():
+async def api_automator_test(automator_id: Optional[str] = None):
     """Test Automator connection."""
-    return check_automator_connection()
+    return check_automator_connection(automator_id)
 
 
 @app.post("/api/automator/refresh")
-async def api_automator_refresh():
+async def api_automator_refresh(automator_id: Optional[str] = None):
     """Force refresh Automator data from API."""
     try:
-        items = fetch_automator_macros(force_refresh=True)
+        items = fetch_automator_macros(automator_id, force_refresh=True)
         return {
             "ok": True,
             "count": len(items),
-            "message": f"Loaded {len(items)} items from Automator"
+            "message": f"Loaded {len(items)} items"
         }
     except Exception as e:
         return {
@@ -2678,10 +3017,109 @@ async def api_automator_refresh():
 
 
 @app.post("/api/automator/trigger/{macro_id}")
-async def api_trigger_macro(macro_id: str, item_type: str = "macro"):
+async def api_trigger_macro(macro_id: str, item_type: str = "macro", automator_id: Optional[str] = None):
     """Manually trigger an Automator macro, button, or shortcut."""
-    await trigger_automator_macro(macro_id, f"Manual trigger: {macro_id}", item_type)
+    await trigger_automator_macro(macro_id, f"Manual trigger: {macro_id}", item_type, automator_id)
     return {"success": True, "macro_id": macro_id, "type": item_type}
+
+
+# New Automator Management Endpoints
+@app.get("/api/automators")
+async def api_get_automators():
+    """Get all Automator configurations."""
+    return {"automators": get_all_automators()}
+
+
+@app.post("/api/automators")
+async def api_add_automator(automator: AutomatorConfig):
+    """Add new Automator."""
+    global config_data
+    import uuid
+
+    automators = config_data.get("automators", [])
+
+    # Generate ID if not provided
+    if not automator.id:
+        automator.id = f"auto_{uuid.uuid4().hex[:8]}"
+
+    # Check if ID already exists
+    if any(a["id"] == automator.id for a in automators):
+        raise HTTPException(400, "Automator ID already exists")
+
+    automators.append(automator.dict())
+    config_data["automators"] = automators
+    save_config(config_data)
+
+    log_event("Config", f"Added Automator: {automator.name}")
+    return {"success": True, "automator": automator.dict()}
+
+
+@app.put("/api/automators/{automator_id}")
+async def api_update_automator(automator_id: str, automator: AutomatorConfig):
+    """Update existing Automator."""
+    global config_data
+
+    automators = config_data.get("automators", [])
+    found = False
+
+    for i, a in enumerate(automators):
+        if a["id"] == automator_id:
+            automators[i] = automator.dict()
+            found = True
+            break
+
+    if not found:
+        raise HTTPException(404, "Automator not found")
+
+    config_data["automators"] = automators
+    save_config(config_data)
+
+    log_event("Config", f"Updated Automator: {automator.name}")
+    return {"success": True, "automator": automator.dict()}
+
+
+@app.delete("/api/automators/{automator_id}")
+async def api_delete_automator(automator_id: str):
+    """Check for orphaned mappings before deletion."""
+    global config_data
+
+    automator = get_automator_by_id(automator_id)
+    if not automator:
+        raise HTTPException(404, "Automator not found")
+
+    # Check for orphaned mappings
+    mappings = config_data.get("command_mappings", [])
+    orphaned = [m for m in mappings if m.get("automator_id") == automator_id]
+
+    return {
+        "automator": automator,
+        "orphaned_mappings": orphaned,
+        "count": len(orphaned),
+        "requires_confirmation": len(orphaned) > 0
+    }
+
+
+@app.post("/api/automators/{automator_id}/delete")
+async def api_delete_automator_confirm(automator_id: str, delete_mappings: bool = True):
+    """Confirm deletion of Automator and handle orphaned mappings."""
+    global config_data
+
+    # Remove Automator
+    automators = config_data.get("automators", [])
+    config_data["automators"] = [a for a in automators if a["id"] != automator_id]
+
+    # Handle mappings
+    deleted_count = 0
+    if delete_mappings:
+        mappings = config_data.get("command_mappings", [])
+        old_count = len(mappings)
+        config_data["command_mappings"] = [m for m in mappings if m.get("automator_id") != automator_id]
+        deleted_count = old_count - len(config_data["command_mappings"])
+
+    save_config(config_data)
+    log_event("Config", f"Deleted Automator: {automator_id} ({deleted_count} mappings removed)")
+
+    return {"success": True, "deleted_mappings": deleted_count}
 
 
 @app.post("/api/config")
@@ -2698,9 +3136,14 @@ async def api_update_config(config_update: ConfigUpdate):
         config_data["tcp_commands"] = [c.dict() for c in config_update.tcp_commands]
         log_event("Config", f"Updated TCP commands ({len(config_update.tcp_commands)} commands)")
 
-    if config_update.automator is not None:
-        config_data["automator"] = config_update.automator.dict()
-        log_event("Config", f"Updated Automator config (enabled: {config_update.automator.enabled})")
+    if config_update.automators is not None:
+        config_data["automators"] = [a.dict() for a in config_update.automators]
+        log_event("Config", f"Updated Automators ({len(config_update.automators)} configured)")
+
+    if config_update.first_run is not None:
+        config_data["first_run"] = config_update.first_run
+        if not config_update.first_run:
+            log_event("Config", "Welcome banner dismissed")
 
     if config_update.command_mappings is not None:
         config_data["command_mappings"] = [m.dict() for m in config_update.command_mappings]

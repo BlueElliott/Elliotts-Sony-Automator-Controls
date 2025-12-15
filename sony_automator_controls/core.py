@@ -173,6 +173,7 @@ class ConfigUpdate(BaseModel):
 class SettingsIn(BaseModel):
     web_port: Optional[int] = None
     theme: Optional[str] = "dark"
+    first_run: Optional[bool] = None
 
 
 # Configuration management
@@ -1009,6 +1010,38 @@ def _get_base_styles() -> str:
             color: #fff;
         }}
 
+        /* Connection Status Indicator */
+        .connection-status {{
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-left: 12px;
+            align-self: center;
+        }}
+
+        .connection-status.connected {{
+            background: #00bcd4;
+            box-shadow: 0 0 8px rgba(0, 188, 212, 0.6);
+            animation: pulse-connected 2s ease-in-out infinite;
+        }}
+
+        .connection-status.disconnected {{
+            background: #f44336;
+            box-shadow: 0 0 8px rgba(244, 67, 54, 0.6);
+        }}
+
+        @keyframes pulse-connected {{
+            0%, 100% {{
+                opacity: 1;
+                box-shadow: 0 0 8px rgba(0, 188, 212, 0.6);
+            }}
+            50% {{
+                opacity: 0.6;
+                box-shadow: 0 0 4px rgba(0, 188, 212, 0.4);
+            }}
+        }}
+
         /* Sections / Fieldsets - Elliott's style */
         fieldset {{
             margin-bottom: 20px;
@@ -1458,7 +1491,10 @@ def _get_nav_html(active_page: str = "home") -> str:
         active_class = ' class="active"' if page_id == active_page else ""
         nav_items += f'<a href="{url}"{active_class}>{title}</a>'
 
-    return f'<div class="nav">{nav_items}</div>'
+    # Add connection status indicator
+    connection_status = '<span id="connection-status" class="connection-status connected" title="Connected to server"></span>'
+
+    return f'<div class="nav">{nav_items}{connection_status}</div>'
 
 
 def _get_base_html(title: str, content: str, active_page: str = "home") -> str:
@@ -1471,6 +1507,60 @@ def _get_base_html(title: str, content: str, active_page: str = "home") -> str:
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>{title} - Elliott's Sony Automator Controls v{_runtime_version()}</title>
         {_get_base_styles()}
+        <style>
+            #disconnected-overlay {{
+                display: none;
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: rgba(0, 0, 0, 0.9);
+                z-index: 10000;
+                justify-content: center;
+                align-items: center;
+                flex-direction: column;
+            }}
+            #disconnected-overlay.show {{
+                display: flex;
+            }}
+            .disconnect-message {{
+                background: #1a1a1a;
+                border: 2px solid #f44336;
+                border-radius: 12px;
+                padding: 40px;
+                text-align: center;
+                max-width: 500px;
+            }}
+            .disconnect-icon {{
+                font-size: 64px;
+                margin-bottom: 20px;
+            }}
+            .disconnect-title {{
+                font-size: 24px;
+                font-weight: bold;
+                color: #f44336;
+                margin-bottom: 10px;
+            }}
+            .disconnect-text {{
+                font-size: 16px;
+                color: #aaa;
+                margin-bottom: 20px;
+            }}
+            .reconnecting {{
+                display: inline-block;
+                width: 8px;
+                height: 8px;
+                background: #4caf50;
+                border-radius: 50%;
+                margin-right: 8px;
+                animation: pulse 1.5s ease-in-out infinite;
+            }}
+            @keyframes pulse {{
+                0%, 100% {{ opacity: 1; }}
+                50% {{ opacity: 0.3; }}
+            }}
+        </style>
     </head>
     <body>
         {_get_nav_html(active_page)}
@@ -1478,6 +1568,127 @@ def _get_base_html(title: str, content: str, active_page: str = "home") -> str:
         <p style="color: #888; font-size: 0.9em; margin-top: -10px;">Version {_runtime_version()}</p>
         <p>{title}</p>
         {content}
+
+        <!-- Disconnect Overlay -->
+        <div id="disconnected-overlay">
+            <div class="disconnect-message">
+                <div class="disconnect-icon">⚠️</div>
+                <div class="disconnect-title">Server Disconnected</div>
+                <div class="disconnect-text">
+                    Lost connection to Elliott's Sony Automator Controls server.
+                </div>
+                <div style="color: #888;">
+                    <span class="reconnecting"></span>
+                    <span id="reconnect-status">Attempting to reconnect...</span>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            // Disconnect detection
+            let heartbeatInterval = null;
+            let reconnectAttempts = 0;
+            const MAX_RECONNECT_ATTEMPTS = 999999; // Basically infinite
+            const HEARTBEAT_INTERVAL = 5000; // Check every 5 seconds
+            const RECONNECT_DELAY = 2000; // Wait 2 seconds between reconnect attempts
+
+            function startHeartbeat() {{
+                if (heartbeatInterval) {{
+                    clearInterval(heartbeatInterval);
+                }}
+
+                heartbeatInterval = setInterval(checkConnection, HEARTBEAT_INTERVAL);
+            }}
+
+            async function checkConnection() {{
+                try {{
+                    const response = await fetch('/health', {{
+                        method: 'GET',
+                        cache: 'no-cache',
+                        signal: AbortSignal.timeout(3000)
+                    }});
+
+                    if (response.ok) {{
+                        // Connected
+                        const statusIndicator = document.getElementById('connection-status');
+                        if (statusIndicator) {{
+                            statusIndicator.classList.remove('disconnected');
+                            statusIndicator.classList.add('connected');
+                            statusIndicator.title = 'Connected to server';
+                        }}
+
+                        if (document.getElementById('disconnected-overlay').classList.contains('show')) {{
+                            // Was disconnected, now reconnected
+                            onReconnect();
+                        }}
+                        reconnectAttempts = 0;
+                    }} else {{
+                        onDisconnect();
+                    }}
+                }} catch (e) {{
+                    onDisconnect();
+                }}
+            }}
+
+            function onDisconnect() {{
+                console.log('Server disconnected - showing overlay');
+
+                const statusIndicator = document.getElementById('connection-status');
+                if (statusIndicator) {{
+                    statusIndicator.classList.remove('connected');
+                    statusIndicator.classList.add('disconnected');
+                    statusIndicator.title = 'Disconnected from server';
+                }}
+
+                const overlay = document.getElementById('disconnected-overlay');
+                if (overlay) {{
+                    if (!overlay.classList.contains('show')) {{
+                        overlay.classList.add('show');
+                        console.log('Overlay shown');
+                    }}
+                }} else {{
+                    console.error('Disconnect overlay element not found!');
+                }}
+
+                reconnectAttempts++;
+                const status = document.getElementById('reconnect-status');
+                if (status) {{
+                    if (reconnectAttempts > 1) {{
+                        status.textContent = `Reconnecting... (attempt ${{reconnectAttempts}})`;
+                    }} else {{
+                        status.textContent = 'Attempting to reconnect...';
+                    }}
+                }}
+            }}
+
+            function onReconnect() {{
+                location.reload();
+            }}
+
+            // Start heartbeat when page loads (with slight delay to let page fully load)
+            console.log('Initializing disconnect detection system...');
+            setTimeout(() => {{
+                console.log('Starting heartbeat monitoring (checking every 5 seconds)');
+                startHeartbeat();
+            }}, 100);
+
+            // Also check connection when page becomes visible again
+            document.addEventListener('visibilitychange', () => {{
+                if (!document.hidden) {{
+                    checkConnection();
+                }}
+            }});
+
+            // Prevent page unload/navigation if server is disconnected
+            window.addEventListener('beforeunload', (e) => {{
+                const overlay = document.getElementById('disconnected-overlay');
+                if (overlay && overlay.classList.contains('show')) {{
+                    e.preventDefault();
+                    e.returnValue = '';
+                    return '';
+                }}
+            }});
+        </script>
     </body>
     </html>
     """
@@ -1498,15 +1709,15 @@ async def home():
     welcome_html = ""
     if show_welcome:
         welcome_html = """
-        <div class="section" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-radius: 12px; padding: 30px; margin-bottom: 30px;">
-            <h2 style="color: white; margin-top: 0;">👋 Welcome to Sony Automator Controls v1.1.0!</h2>
+        <div class="section" style="background: linear-gradient(135deg, #00bcd4 0%, #0097a7 100%); color: white; border-radius: 12px; padding: 30px; margin-bottom: 30px; box-shadow: 0 4px 20px rgba(0, 188, 212, 0.3);">
+            <h2 style="color: white; margin-top: 0;">👋 Welcome to Sony Automator Controls v1.1.1!</h2>
             <p style="font-size: 16px; margin-bottom: 20px;">Let's get you set up in a few easy steps:</p>
             <ol style="font-size: 15px; line-height: 1.8;">
-                <li><strong>Add Automator:</strong> Go to <a href="/automator-macros" style="color: #ffd700; text-decoration: underline;">Automator Controls</a> and configure your first Automator connection</li>
-                <li><strong>Setup TCP:</strong> Configure <a href="/tcp-commands" style="color: #ffd700; text-decoration: underline;">TCP Listeners and Commands</a></li>
-                <li><strong>Create Mappings:</strong> Link commands to macros in <a href="/command-mapping" style="color: #ffd700; text-decoration: underline;">Command Mapping</a></li>
+                <li><strong>Add Automator:</strong> Go to <a href="/automator-macros" style="color: #e0f7fa; text-decoration: underline;">Automator Controls</a> and configure your first Automator connection</li>
+                <li><strong>Setup TCP:</strong> Configure <a href="/tcp-commands" style="color: #e0f7fa; text-decoration: underline;">TCP Listeners and Commands</a></li>
+                <li><strong>Create Mappings:</strong> Link commands to macros in <a href="/command-mapping" style="color: #e0f7fa; text-decoration: underline;">Command Mapping</a></li>
             </ol>
-            <button onclick="dismissWelcome()" style="background: white; color: #667eea; border: none; padding: 10px 24px; border-radius: 6px; font-weight: bold; cursor: pointer; margin-top: 15px; font-size: 14px;">Got it, don't show again</button>
+            <button onclick="dismissWelcome()" style="background: white; color: #00bcd4; border: none; padding: 10px 24px; border-radius: 6px; font-weight: bold; cursor: pointer; margin-top: 15px; font-size: 14px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2); transition: all 0.2s;">Got it, don't show again</button>
         </div>
         """
 
@@ -1659,9 +1870,6 @@ async def home():
             }});
             location.reload();
         }}
-
-        // Auto-refresh every 3 seconds
-        setTimeout(() => location.reload(), 3000);
     </script>
     """
 
@@ -1724,7 +1932,25 @@ async def tcp_commands_page():
         <div class="item-list">
             {listeners_html}
         </div>
-        <button class="primary mt-20" onclick="showAddListenerForm()">Add TCP Listener</button>
+
+        <div id="listener-form" style="display: none; margin-top: 20px; padding: 20px; background: #1e1e1e; border-radius: 8px; border: 1px solid #333;">
+            <h3 style="margin-top: 0;">Add TCP Listener</h3>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 600;">Port Number</label>
+                <input type="number" id="listener-port" placeholder="e.g., 9001" style="width: 100%; padding: 10px; font-size: 14px; border-radius: 6px;">
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 600;">Name</label>
+                <input type="text" id="listener-name" placeholder="e.g., Main Listener" style="width: 100%; padding: 10px; font-size: 14px; border-radius: 6px;">
+            </div>
+            <div style="display: flex; gap: 10px;">
+                <button class="primary" onclick="saveListener()">Save</button>
+                <button class="secondary" onclick="cancelListenerForm()">Cancel</button>
+            </div>
+        </div>
+
+        <button class="primary mt-20" onclick="showAddListenerForm()" id="add-listener-btn">Add TCP Listener</button>
+        <div id="listener-status" style="margin-top: 16px;"></div>
     </div>
 
     <div class="section">
@@ -1738,20 +1964,62 @@ async def tcp_commands_page():
         <div class="item-list" id="tcp-commands-list">
             {commands_html}
         </div>
+
+        <div id="command-form" style="display: none; margin-top: 20px; padding: 20px; background: #1e1e1e; border-radius: 8px; border: 1px solid #333;">
+            <h3 style="margin-top: 0;" id="command-form-title">Add TCP Command</h3>
+            <input type="hidden" id="command-edit-id">
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 600;">Command Name</label>
+                <input type="text" id="command-name" placeholder="e.g., Start Recording" style="width: 100%; padding: 10px; font-size: 14px; border-radius: 6px;">
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 600;">TCP Trigger String</label>
+                <input type="text" id="command-trigger" placeholder="e.g., REC_START" style="width: 100%; padding: 10px; font-size: 14px; border-radius: 6px;">
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 600;">Description (optional)</label>
+                <input type="text" id="command-description" placeholder="e.g., Starts recording on device" style="width: 100%; padding: 10px; font-size: 14px; border-radius: 6px;">
+            </div>
+            <div style="display: flex; gap: 10px;">
+                <button class="primary" onclick="saveCommand()">Save</button>
+                <button class="secondary" onclick="cancelCommandForm()">Cancel</button>
+            </div>
+        </div>
+
         <div class="btn-row">
-            <button class="primary" onclick="showAddCommandForm()">Add TCP Command</button>
+            <button class="primary" onclick="showAddCommandForm()" id="add-command-btn">Add TCP Command</button>
             <button class="warning" onclick="startTCPCapture()">Listen for TCP Command</button>
         </div>
+        <div id="command-status" style="margin-top: 16px;"></div>
         <div id="capture-status" style="margin-top: 16px;"></div>
     </div>
 
     <script>
         function showAddListenerForm() {{
-            const port = prompt("Enter TCP port number:");
-            const name = prompt("Enter listener name:");
-            if (port && name) {{
-                addListener(parseInt(port), name);
+            document.getElementById('listener-form').style.display = 'block';
+            document.getElementById('add-listener-btn').style.display = 'none';
+            document.getElementById('listener-port').value = '';
+            document.getElementById('listener-name').value = '';
+            document.getElementById('listener-port').focus();
+        }}
+
+        function cancelListenerForm() {{
+            document.getElementById('listener-form').style.display = 'none';
+            document.getElementById('add-listener-btn').style.display = 'inline-block';
+        }}
+
+        async function saveListener() {{
+            const port = parseInt(document.getElementById('listener-port').value);
+            const name = document.getElementById('listener-name').value.trim();
+
+            if (!port || !name) {{
+                const statusDiv = document.getElementById('listener-status');
+                statusDiv.innerHTML = '<div class="alert error">Please fill in all fields</div>';
+                setTimeout(() => statusDiv.innerHTML = '', 3000);
+                return;
             }}
+
+            await addListener(port, name);
         }}
 
         async function addListener(port, name) {{
@@ -1767,13 +2035,13 @@ async def tcp_commands_page():
             if (response.ok) {{
                 location.reload();
             }} else {{
-                alert('Error adding listener');
+                const statusDiv = document.getElementById('listener-status');
+                statusDiv.innerHTML = '<div class="alert error">Error adding listener</div>';
+                setTimeout(() => statusDiv.innerHTML = '', 3000);
             }}
         }}
 
         async function deleteListener(port) {{
-            if (!confirm('Delete this listener?')) return;
-
             const listeners = {json.dumps(listeners)}.filter(l => l.port !== port);
 
             const response = await fetch('/api/config', {{
@@ -1785,7 +2053,9 @@ async def tcp_commands_page():
             if (response.ok) {{
                 location.reload();
             }} else {{
-                alert('Error deleting listener');
+                const statusDiv = document.getElementById('listener-status');
+                statusDiv.innerHTML = '<div class="alert error">Error deleting listener</div>';
+                setTimeout(() => statusDiv.innerHTML = '', 3000);
             }}
         }}
 
@@ -1806,16 +2076,45 @@ async def tcp_commands_page():
             if (response.ok) {{
                 location.reload();
             }} else {{
-                alert('Error toggling listener');
+                const statusDiv = document.getElementById('listener-status');
+                statusDiv.innerHTML = '<div class="alert error">Error toggling listener</div>';
+                setTimeout(() => statusDiv.innerHTML = '', 3000);
             }}
         }}
 
         function showAddCommandForm() {{
-            const name = prompt("Command name:");
-            const trigger = prompt("TCP trigger string:");
-            const description = prompt("Description (optional):");
-            if (name && trigger) {{
-                addCommand(name, trigger, description || "");
+            document.getElementById('command-form').style.display = 'block';
+            document.getElementById('add-command-btn').style.display = 'none';
+            document.getElementById('command-form-title').textContent = 'Add TCP Command';
+            document.getElementById('command-edit-id').value = '';
+            document.getElementById('command-name').value = '';
+            document.getElementById('command-trigger').value = '';
+            document.getElementById('command-description').value = '';
+            document.getElementById('command-name').focus();
+        }}
+
+        function cancelCommandForm() {{
+            document.getElementById('command-form').style.display = 'none';
+            document.getElementById('add-command-btn').style.display = 'inline-block';
+        }}
+
+        async function saveCommand() {{
+            const id = document.getElementById('command-edit-id').value;
+            const name = document.getElementById('command-name').value.trim();
+            const trigger = document.getElementById('command-trigger').value.trim();
+            const description = document.getElementById('command-description').value.trim();
+
+            if (!name || !trigger) {{
+                const statusDiv = document.getElementById('command-status');
+                statusDiv.innerHTML = '<div class="alert error">Please fill in name and trigger fields</div>';
+                setTimeout(() => statusDiv.innerHTML = '', 3000);
+                return;
+            }}
+
+            if (id) {{
+                await updateCommand(id, name, trigger, description);
+            }} else {{
+                await addCommand(name, trigger, description);
             }}
         }}
 
@@ -1833,13 +2132,13 @@ async def tcp_commands_page():
             if (response.ok) {{
                 location.reload();
             }} else {{
-                alert('Error adding command');
+                const statusDiv = document.getElementById('command-status');
+                statusDiv.innerHTML = '<div class="alert error">Error adding command</div>';
+                setTimeout(() => statusDiv.innerHTML = '', 3000);
             }}
         }}
 
         async function deleteCommand(id) {{
-            if (!confirm('Delete this command?')) return;
-
             const commands = {json.dumps(commands)}.filter(c => c.id !== id);
 
             const response = await fetch('/api/config', {{
@@ -1851,7 +2150,9 @@ async def tcp_commands_page():
             if (response.ok) {{
                 location.reload();
             }} else {{
-                alert('Error deleting command');
+                const statusDiv = document.getElementById('command-status');
+                statusDiv.innerHTML = '<div class="alert error">Error deleting command</div>';
+                setTimeout(() => statusDiv.innerHTML = '', 3000);
             }}
         }}
 
@@ -1859,20 +2160,20 @@ async def tcp_commands_page():
             const commands = {json.dumps(commands)};
             const cmd = commands.find(c => c.id === id);
             if (!cmd) {{
-                alert('Command not found');
+                const statusDiv = document.getElementById('command-status');
+                statusDiv.innerHTML = '<div class="alert error">Command not found</div>';
+                setTimeout(() => statusDiv.innerHTML = '', 3000);
                 return;
             }}
 
-            const name = prompt('Command name:', cmd.name);
-            if (name === null) return; // Cancelled
-
-            const trigger = prompt('TCP trigger string:', cmd.tcp_trigger);
-            if (trigger === null) return; // Cancelled
-
-            const description = prompt('Description (optional):', cmd.description || '');
-            if (description === null) return; // Cancelled
-
-            updateCommand(id, name, trigger, description);
+            document.getElementById('command-form').style.display = 'block';
+            document.getElementById('add-command-btn').style.display = 'none';
+            document.getElementById('command-form-title').textContent = 'Edit TCP Command';
+            document.getElementById('command-edit-id').value = id;
+            document.getElementById('command-name').value = cmd.name;
+            document.getElementById('command-trigger').value = cmd.tcp_trigger;
+            document.getElementById('command-description').value = cmd.description || '';
+            document.getElementById('command-name').focus();
         }}
 
         async function updateCommand(id, name, trigger, description) {{
@@ -1893,7 +2194,9 @@ async def tcp_commands_page():
             if (response.ok) {{
                 location.reload();
             }} else {{
-                alert('Error updating command');
+                const statusDiv = document.getElementById('command-status');
+                statusDiv.innerHTML = '<div class="alert error">Error updating command</div>';
+                setTimeout(() => statusDiv.innerHTML = '', 3000);
             }}
         }}
 
@@ -1944,20 +2247,23 @@ async def tcp_commands_page():
                     const source = data.data.source;
 
                     const statusDiv = document.getElementById('capture-status');
-                    statusDiv.innerHTML = '<div class="alert success">Captured TCP command: <strong>' + cmd + '</strong> from port ' + port + ' (source: ' + source + ')</div>';
-
-                    // Prompt to add as command
-                    if (confirm('Captured command: "' + cmd + '"\\n\\nWould you like to add this as a new TCP command?')) {{
-                        const name = prompt('Command name:', cmd);
-                        const description = prompt('Description (optional):');
-                        if (name) {{
-                            addCommand(name, cmd, description || '');
-                        }}
-                    }}
+                    statusDiv.innerHTML = '<div class="alert success">Captured TCP command: <strong>' + cmd + '</strong> from port ' + port + ' (source: ' + source + ')<br><button class="primary mt-10" onclick="addCapturedCommand(\\''+cmd+'\\')">Add as TCP Command</button></div>';
                 }}
             }} catch (e) {{
                 console.error('Error checking capture status:', e);
             }}
+        }}
+
+        function addCapturedCommand(cmd) {{
+            document.getElementById('command-form').style.display = 'block';
+            document.getElementById('add-command-btn').style.display = 'none';
+            document.getElementById('command-form-title').textContent = 'Add Captured TCP Command';
+            document.getElementById('command-edit-id').value = '';
+            document.getElementById('command-name').value = cmd;
+            document.getElementById('command-trigger').value = cmd;
+            document.getElementById('command-description').value = '';
+            document.getElementById('command-name').focus();
+            document.getElementById('capture-status').innerHTML = '';
         }}
 
         async function cancelCapture() {{
@@ -2008,228 +2314,176 @@ async def automator_macros_page():
     automators = get_all_automators()
 
     # Build Automator management section (at the TOP per user request)
-    automator_cards_html = ""
+    automator_items_html = ""
 
-    if len(automators) == 0:
-        automator_cards_html = """
-        <div class="alert info">
-            <strong>No Automators configured.</strong><br>
-            Click "Add Automator" below to connect your first Automator instance.
+    for automator in automators:
+        auto_id = automator["id"]
+        auto_name = automator["name"]
+        auto_url = automator.get("url", "Not configured")
+        auto_enabled = automator.get("enabled", False)
+
+        # Check connection status
+        status = check_automator_connection(auto_id)
+        if status["connected"]:
+            status_badge = "🟢 Connected"
+        else:
+            status_badge = "🔴 Disconnected"
+
+        # Get cache info
+        cache = get_automator_cache(auto_id)
+        total_items = len(cache.get("macros", [])) + len(cache.get("buttons", [])) + len(cache.get("shortcuts", []))
+
+        enabled_badge = "🟢 Enabled" if auto_enabled else "🔴 Disabled"
+
+        automator_items_html += f"""
+        <div class="item">
+            <div class="item-info">
+                <div class="item-title">{auto_name} - {auto_url}</div>
+                <div class="item-detail">{enabled_badge} | {status_badge} | {total_items} items cached</div>
+            </div>
+            <div class="item-actions">
+                <button class="secondary" onclick="toggleAutomator('{auto_id}')">
+                    {'Disable' if auto_enabled else 'Enable'}
+                </button>
+                <button class="secondary" onclick="editAutomator('{auto_id}')">Edit</button>
+                <button class="danger" onclick="deleteAutomator('{auto_id}', '{auto_name}')">Delete</button>
+            </div>
         </div>
         """
-    else:
-        for automator in automators:
-            auto_id = automator["id"]
-            auto_name = automator["name"]
-            auto_url = automator.get("url", "Not configured")
-            auto_enabled = automator.get("enabled", False)
-
-            # Check connection status
-            status = check_automator_connection(auto_id)
-            if status["connected"]:
-                status_class = "success"
-                status_text = "✓ Connected"
-            else:
-                status_class = "error"
-                status_text = f"✗ {status.get('error', 'Disconnected')}"
-
-            # Get cache info
-            cache = get_automator_cache(auto_id)
-            total_items = len(cache.get("macros", [])) + len(cache.get("buttons", [])) + len(cache.get("shortcuts", []))
-            cache_age = ""
-            if cache.get("last_updated"):
-                try:
-                    last_updated = datetime.fromisoformat(cache["last_updated"])
-                    cache_age = last_updated.strftime("%Y-%m-%d %H:%M:%S")
-                except:
-                    cache_age = "Unknown"
-            else:
-                cache_age = "No data"
-
-            enabled_badge = '<span style="background: #4caf50; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-left: 8px;">ENABLED</span>' if auto_enabled else '<span style="background: #666; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-left: 8px;">DISABLED</span>'
-
-            automator_cards_html += f"""
-            <div class="automator-card" style="background: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 20px; margin-bottom: 15px;">
-                <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 12px;">
-                    <div>
-                        <h3 style="margin: 0 0 8px 0; font-size: 18px;">{auto_name}{enabled_badge}</h3>
-                        <p style="color: #888; margin: 4px 0; font-size: 13px;">{auto_url}</p>
-                        <p style="color: #888; margin: 4px 0; font-size: 12px;">Cached: {total_items} items | Last updated: {cache_age}</p>
-                    </div>
-                    <div class="alert {status_class}" style="margin: 0; padding: 6px 12px; font-size: 13px;">
-                        {status_text}
-                    </div>
-                </div>
-                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                    <button class="secondary" onclick="testAutomator('{auto_id}')" style="font-size: 13px; padding: 8px 16px;">Test Connection</button>
-                    <button class="secondary" onclick="refreshAutomator('{auto_id}')" style="font-size: 13px; padding: 8px 16px;">Refresh Data</button>
-                    <button class="secondary" onclick="editAutomator('{auto_id}')" style="font-size: 13px; padding: 8px 16px;">Edit</button>
-                    <button class="danger" onclick="deleteAutomator('{auto_id}', '{auto_name}')" style="font-size: 13px; padding: 8px 16px;">Delete</button>
-                </div>
-                <div id="status-{auto_id}" style="margin-top: 12px;"></div>
-            </div>
-            """
 
     automator_management = f"""
     <div class="section">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-            <h2 style="margin: 0;">Automator Connections</h2>
-            <button class="success" onclick="showAddAutomatorDialog()" style="font-size: 14px;">+ Add Automator</button>
+        <h2>Automator Connections</h2>
+        <p style="color: #888888; margin-bottom: 20px;">Configure connections to your Cuez Automator instances.</p>
+        <div class="item-list">
+            {automator_items_html}
         </div>
 
-        {automator_cards_html}
-    </div>
-
-    <!-- Add/Edit Automator Dialog -->
-    <div id="automatorDialog" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; justify-content: center; align-items: center;">
-        <div style="background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 30px; max-width: 500px; width: 90%;">
-            <h2 id="dialogTitle">Add Automator</h2>
-            <form id="automatorForm" onsubmit="saveAutomator(event)">
-                <input type="hidden" id="automatorId">
-
-                <div class="form-group">
-                    <label>Name</label>
-                    <input type="text" id="automatorName" placeholder="e.g., Primary Automator" required>
-                </div>
-
-                <div class="form-group">
-                    <label>API URL</label>
-                    <input type="text" id="automatorUrl" placeholder="http://127.0.0.1:7070" required>
-                    <p style="color: #888; font-size: 12px; margin-top: 6px;">Enter the full URL including protocol and port</p>
-                </div>
-
-                <div class="form-group">
-                    <label>API Key (optional)</label>
-                    <input type="text" id="automatorApiKey" placeholder="Leave blank if not required">
-                </div>
-
-                <div class="form-group">
-                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                        <input type="checkbox" id="automatorEnabled" checked>
-                        <span>Enabled</span>
-                    </label>
-                </div>
-
-                <div style="display: flex; gap: 10px; margin-top: 20px;">
-                    <button type="submit" class="success">Save</button>
-                    <button type="button" class="secondary" onclick="closeAutomatorDialog()">Cancel</button>
-                </div>
-
-                <div id="dialogStatus" style="margin-top: 15px;"></div>
-            </form>
+        <div id="automator-form" style="display: none; margin-top: 20px; padding: 20px; background: #1e1e1e; border-radius: 8px; border: 1px solid #333;">
+            <h3 style="margin-top: 0;" id="automator-form-title">Add Automator</h3>
+            <input type="hidden" id="automator-edit-id">
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 600;">Name</label>
+                <input type="text" id="automator-name" placeholder="e.g., Primary Automator" style="width: 100%; padding: 10px; font-size: 14px; border-radius: 6px;">
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 600;">API URL</label>
+                <input type="text" id="automator-url" placeholder="http://127.0.0.1:7070" style="width: 100%; padding: 10px; font-size: 14px; border-radius: 6px;">
+            </div>
+            <div style="display: flex; gap: 10px;">
+                <button class="primary" onclick="saveAutomator()">Save</button>
+                <button class="secondary" onclick="cancelAutomatorForm()">Cancel</button>
+            </div>
         </div>
+
+        <button class="primary mt-20" onclick="showAddAutomatorForm()" id="add-automator-btn">Add Automator</button>
+        <div id="automator-status" style="margin-top: 16px;"></div>
     </div>
     """
 
-    # Automator selector for viewing macros
-    automator_selector_html = ""
-    selected_automator_id = None
+    # Build sections for each Automator
+    def build_automator_section(automator):
+        auto_id = automator["id"]
+        auto_name = automator["name"]
 
-    if len(automators) > 0:
-        # Default to first Automator
-        selected_automator_id = automators[0]["id"]
+        # Fetch all items for this Automator
+        all_items = fetch_automator_macros(auto_id)
 
-        options_html = ""
-        for auto in automators:
-            options_html += f'<option value="{auto["id"]}">{auto["name"]}</option>'
+        # Organize by type
+        macros_list = []
+        buttons_list = []
+        shortcuts_list = []
 
-        automator_selector_html = f"""
-        <div style="margin-bottom: 20px; padding: 15px; background: #1e1e1e; border-radius: 8px;">
-            <label style="display: block; margin-bottom: 8px; font-weight: 600;">Select Automator to view:</label>
-            <select id="automatorSelector" onchange="switchAutomator()" style="width: 100%; padding: 10px; font-size: 14px;">
-                {options_html}
-            </select>
-        </div>
-        """
+        for item in all_items:
+            item_type = item.get("type", "")
+            if item_type == "button":
+                buttons_list.append(item)
+            elif item_type == "shortcut":
+                shortcuts_list.append(item)
+            else:
+                macros_list.append(item)
 
-    # Fetch and organize macros/buttons/shortcuts for selected Automator
-    macros_list = []
-    buttons_list = []
-    shortcuts_list = []
+        # Build subsections
+        def build_type_section(items, section_title, section_id):
+            if not items:
+                return ""
 
-    if selected_automator_id:
-        all_items = fetch_automator_macros(selected_automator_id)
-    else:
-        all_items = []
+            items_html = ""
+            for item in items:
+                item_id = item.get("id", "")
+                item_name = item.get("title", item.get("name", "Unknown"))
+                item_type = item.get("type", "macro")
+                items_html += f"""
+                <div class="item searchable-item" data-name="{item_name.lower()}" data-automator="{auto_id}" data-type="{item_type}">
+                    <div class="item-info">
+                        <div class="item-title">{item_name}</div>
+                    </div>
+                    <div class="item-actions">
+                        <a href="javascript:void(0)" class="play-btn" onclick="testMacro('{item_id}', '{item_name}', '{item_type}', '{auto_id}')" title="Test {item_name}">▶</a>
+                    </div>
+                </div>
+                """
 
-    for item in all_items:
-        item_type = item.get("type", "")
-        if item_type == "button":
-            buttons_list.append(item)
-        elif item_type == "shortcut":
-            shortcuts_list.append(item)
+            return f"""
+            <details id="{section_id}-{auto_id}" style="margin-left: 20px;">
+                <summary style="cursor: pointer; font-weight: 500; font-size: 14px; margin-bottom: 10px; padding: 8px; background: #252525; border-radius: 6px;">
+                    {section_title} ({len(items)})
+                </summary>
+                <div class="item-list" style="margin-top: 8px;">
+                    {items_html}
+                </div>
+            </details>
+            """
+
+        # Get cache info
+        cache = get_automator_cache(auto_id)
+        cache_info = ""
+        if cache.get("last_updated"):
+            try:
+                last_updated = datetime.fromisoformat(cache["last_updated"])
+                cache_info = f'<p style="color: #888; font-size: 12px; margin: 8px 0 8px 20px;">Last updated: {last_updated.strftime("%Y-%m-%d %H:%M:%S")}</p>'
+            except:
+                pass
+
+        if not all_items:
+            subsections_html = '<p style="color: #888; margin-left: 20px;">No cached data. Click "Refresh All" below to load items.</p>'
         else:
-            macros_list.append(item)
-
-    # Build collapsible sections
-    def build_item_section(items, section_title, section_id):
-        if not items:
-            return f'<p style="color: #888888;">No {section_title.lower()} found.</p>'
-
-        items_html = ""
-        for item in items:
-            item_id = item.get("id", "")
-            item_name = item.get("title", item.get("name", "Unknown"))
-            item_type = item.get("type", "macro")  # Get item type, default to macro
-            items_html += f"""
-            <div class="item searchable-item" data-name="{item_name.lower()}" data-type="{section_id}">
-                <div class="item-info">
-                    <div class="item-title">{item_name}</div>
-                </div>
-                <div class="item-actions">
-                    <a href="javascript:void(0)" class="play-btn" onclick="testMacro('{item_id}', '{item_name}', '{item_type}')" title="Test {item_name}">▶</a>
-                </div>
-            </div>
+            subsections_html = f"""
+            {build_type_section(macros_list, "Macros", "macros")}
+            {build_type_section(buttons_list, "Buttons", "buttons")}
+            {build_type_section(shortcuts_list, "Shortcuts", "shortcuts")}
             """
 
         return f"""
-        <details id="{section_id}-section">
-            <summary style="cursor: pointer; font-weight: 600; font-size: 16px; margin-bottom: 15px; padding: 10px; background: #252525; border-radius: 6px;">
-                {section_title} (<span id="{section_id}-count">{len(items)}</span>)
+        <details id="automator-{auto_id}" style="margin-bottom: 15px;">
+            <summary style="cursor: pointer; font-weight: 600; font-size: 16px; margin-bottom: 12px; padding: 12px; background: #1e1e1e; border-radius: 6px; border: 1px solid #333;">
+                {auto_name} ({len(all_items)} items total)
             </summary>
-            <div class="item-list" id="{section_id}-list" style="margin-top: 12px;">
-                {items_html}
-            </div>
+            {cache_info}
+            {subsections_html}
         </details>
         """
 
-    if not all_items:
-        if selected_automator_id:
-            content_html = '<div class="alert info">No cached data available. Click Refresh to load macros, buttons, and shortcuts from this Automator.</div>'
-        else:
-            content_html = '<div class="alert info">No Automators configured. Add an Automator above to get started.</div>'
+    # Build all Automator sections
+    if len(automators) == 0:
+        all_sections_html = '<div class="alert info">No Automators configured. Add an Automator above to get started.</div>'
     else:
-        # Show cache age if available
-        cache_info = ""
-        if selected_automator_id:
-            cache = get_automator_cache(selected_automator_id)
-            if cache.get("last_updated"):
-                try:
-                    last_updated = datetime.fromisoformat(cache["last_updated"])
-                    cache_info = f'<div class="alert info" style="margin-bottom: 15px;">Last updated: {last_updated.strftime("%Y-%m-%d %H:%M:%S")}</div>'
-                except:
-                    pass
-
-        content_html = f"""
-        {cache_info}
-        {build_item_section(macros_list, "Macros", "macros")}
-        {build_item_section(buttons_list, "Buttons", "buttons")}
-        {build_item_section(shortcuts_list, "Shortcuts", "shortcuts")}
-        """
+        all_sections_html = ""
+        for automator in automators:
+            all_sections_html += build_automator_section(automator)
 
     macros_section = f"""
     <div class="section">
         <h2>Available Macros, Buttons & Shortcuts</h2>
-        <p style="color: #888888; margin-bottom: 12px;">Items available in your Automator system. Click to expand/collapse sections.</p>
-
-        {automator_selector_html}
+        <p style="color: #888888; margin-bottom: 12px;">All items from all Automators organized by type. Use search to filter across everything.</p>
 
         <div style="margin-bottom: 20px;">
-            <input type="text" id="searchBox" placeholder="Search across all items..." style="width: 100%; padding: 10px 14px; font-size: 14px; border-radius: 8px;" oninput="filterItems()">
+            <input type="text" id="searchBox" placeholder="Search across all automators and items..." style="width: 100%; padding: 10px 14px; font-size: 14px; border-radius: 8px;" oninput="filterItems()">
         </div>
 
-        {content_html}
-        <button id="refreshBtn" class="secondary mt-20" onclick="refreshMacros()" {'disabled' if not selected_automator_id else ''}>{"Reload Macros" if all_items else "Load Macros"}</button>
+        {all_sections_html}
+
+        <button class="secondary mt-20" onclick="refreshAllAutomators()">Refresh All Automators</button>
         <div id="refreshStatus" class="mt-20"></div>
     </div>
     """
@@ -2237,19 +2491,73 @@ async def automator_macros_page():
     content = automator_management + macros_section + f"""
     <script>
         // Automator Management Functions
-        function showAddAutomatorDialog() {{
-            document.getElementById('dialogTitle').textContent = 'Add Automator';
-            document.getElementById('automatorId').value = '';
-            document.getElementById('automatorName').value = '';
-            document.getElementById('automatorUrl').value = '';
-            document.getElementById('automatorApiKey').value = '';
-            document.getElementById('automatorEnabled').checked = true;
-            document.getElementById('dialogStatus').innerHTML = '';
-            document.getElementById('automatorDialog').style.display = 'flex';
+        function showAddAutomatorForm() {{
+            document.getElementById('automator-form').style.display = 'block';
+            document.getElementById('add-automator-btn').style.display = 'none';
+            document.getElementById('automator-form-title').textContent = 'Add Automator';
+            document.getElementById('automator-edit-id').value = '';
+            document.getElementById('automator-name').value = '';
+            document.getElementById('automator-url').value = '';
+            document.getElementById('automator-name').focus();
         }}
 
-        function closeAutomatorDialog() {{
-            document.getElementById('automatorDialog').style.display = 'none';
+        function cancelAutomatorForm() {{
+            document.getElementById('automator-form').style.display = 'none';
+            document.getElementById('add-automator-btn').style.display = 'inline-block';
+        }}
+
+        async function saveAutomator() {{
+            const id = document.getElementById('automator-edit-id').value;
+            const name = document.getElementById('automator-name').value.trim();
+            let url = document.getElementById('automator-url').value.trim();
+
+            if (!name || !url) {{
+                const statusDiv = document.getElementById('automator-status');
+                statusDiv.innerHTML = '<div class="alert error">Please fill in all fields</div>';
+                setTimeout(() => statusDiv.innerHTML = '', 3000);
+                return;
+            }}
+
+            if (id) {{
+                await updateAutomator(id, name, url);
+            }} else {{
+                await addAutomator(name, url);
+            }}
+        }}
+
+        async function addAutomator(name, url) {{
+            // Add http:// if not present
+            if (!url.startsWith('http://') && !url.startsWith('https://')) {{
+                url = 'http://' + url;
+            }}
+
+            const automator = {{
+                id: `auto_${{Date.now()}}`,
+                name: name,
+                url: url,
+                enabled: true
+            }};
+
+            try {{
+                const response = await fetch('/api/automators', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify(automator)
+                }});
+
+                if (response.ok) {{
+                    location.reload();
+                }} else {{
+                    const error = await response.json();
+                    const statusDiv = document.getElementById('automator-status');
+                    statusDiv.innerHTML = '<div class="alert error">Error adding Automator: ' + (error.detail || 'Failed to save') + '</div>';
+                    setTimeout(() => statusDiv.innerHTML = '', 3000);
+                }}
+            }} catch (e) {{
+                const statusDiv = document.getElementById('automator-status');
+                statusDiv.innerHTML = '<div class="alert error">Error adding Automator: ' + e.message + '</div>';
+                setTimeout(() => statusDiv.innerHTML = '', 3000);
+            }}
         }}
 
         async function editAutomator(automatorId) {{
@@ -2260,110 +2568,104 @@ async def automator_macros_page():
 
             if (!automator) return;
 
-            document.getElementById('dialogTitle').textContent = 'Edit Automator';
-            document.getElementById('automatorId').value = automator.id;
-            document.getElementById('automatorName').value = automator.name;
-            document.getElementById('automatorUrl').value = automator.url;
-            document.getElementById('automatorApiKey').value = automator.api_key || '';
-            document.getElementById('automatorEnabled').checked = automator.enabled;
-            document.getElementById('dialogStatus').innerHTML = '';
-            document.getElementById('automatorDialog').style.display = 'flex';
+            document.getElementById('automator-form').style.display = 'block';
+            document.getElementById('add-automator-btn').style.display = 'none';
+            document.getElementById('automator-form-title').textContent = 'Edit Automator';
+            document.getElementById('automator-edit-id').value = automator.id;
+            document.getElementById('automator-name').value = automator.name;
+            document.getElementById('automator-url').value = automator.url;
+            document.getElementById('automator-name').focus();
         }}
 
-        async function saveAutomator(event) {{
-            event.preventDefault();
-
-            const automatorId = document.getElementById('automatorId').value;
-            const isEdit = automatorId !== '';
-
-            let url = document.getElementById('automatorUrl').value.trim();
-            if (url && !url.startsWith('http://') && !url.startsWith('https://')) {{
+        async function updateAutomator(automatorId, name, url) {{
+            // Add http:// if not present
+            if (!url.startsWith('http://') && !url.startsWith('https://')) {{
                 url = 'http://' + url;
             }}
 
-            const automator = {{
-                id: automatorId || `auto_${{Date.now()}}`,
-                name: document.getElementById('automatorName').value.trim(),
+            const response = await fetch('/api/automators');
+            const data = await response.json();
+            const automator = data.automators.find(a => a.id === automatorId);
+
+            const updatedAutomator = {{
+                id: automatorId,
+                name: name,
                 url: url,
-                api_key: document.getElementById('automatorApiKey').value.trim(),
-                enabled: document.getElementById('automatorEnabled').checked
+                enabled: automator.enabled
             }};
 
-            const endpoint = isEdit ? `/api/automators/${{automatorId}}` : '/api/automators';
-            const method = isEdit ? 'PUT' : 'POST';
-
             try {{
-                const response = await fetch(endpoint, {{
-                    method: method,
+                const response = await fetch(`/api/automators/${{automatorId}}`, {{
+                    method: 'PUT',
                     headers: {{'Content-Type': 'application/json'}},
-                    body: JSON.stringify(automator)
+                    body: JSON.stringify(updatedAutomator)
                 }});
 
                 if (response.ok) {{
-                    document.getElementById('dialogStatus').innerHTML = '<div class="alert success">Automator saved successfully!</div>';
-                    setTimeout(() => location.reload(), 1000);
+                    location.reload();
                 }} else {{
                     const error = await response.json();
-                    document.getElementById('dialogStatus').innerHTML = `<div class="alert error">Error: ${{error.detail || 'Failed to save'}}</div>`;
+                    const statusDiv = document.getElementById('automator-status');
+                    statusDiv.innerHTML = '<div class="alert error">Error updating Automator: ' + (error.detail || 'Failed to save') + '</div>';
+                    setTimeout(() => statusDiv.innerHTML = '', 3000);
                 }}
             }} catch (e) {{
-                document.getElementById('dialogStatus').innerHTML = `<div class="alert error">Error: ${{e.message}}</div>`;
+                const statusDiv = document.getElementById('automator-status');
+                statusDiv.innerHTML = '<div class="alert error">Error updating Automator: ' + e.message + '</div>';
+                setTimeout(() => statusDiv.innerHTML = '', 3000);
             }}
         }}
 
-        async function testAutomator(automatorId) {{
-            const statusEl = document.getElementById(`status-${{automatorId}}`);
-            statusEl.innerHTML = '<div class="alert info">Testing connection...</div>';
+        async function toggleAutomator(automatorId) {{
+            const response = await fetch('/api/automators');
+            const data = await response.json();
+            const automator = data.automators.find(a => a.id === automatorId);
 
-            const response = await fetch(`/api/automator/test?automator_id=${{automatorId}}`);
-            const result = await response.json();
+            if (!automator) return;
 
-            if (result.connected) {{
-                statusEl.innerHTML = '<div class="alert success">✓ Connection successful!</div>';
-            }} else {{
-                statusEl.innerHTML = `<div class="alert error">✗ Connection failed: ${{result.error}}</div>`;
-            }}
-
-            setTimeout(() => {{ statusEl.innerHTML = ''; }}, 3000);
-        }}
-
-        async function refreshAutomator(automatorId) {{
-            const statusEl = document.getElementById(`status-${{automatorId}}`);
-            statusEl.innerHTML = '<div class="alert info">Refreshing data...</div>';
+            const updatedAutomator = {{
+                id: automator.id,
+                name: automator.name,
+                url: automator.url,
+                enabled: !automator.enabled
+            }};
 
             try {{
-                const response = await fetch(`/api/automator/refresh?automator_id=${{automatorId}}`, {{method: 'POST'}});
-                const result = await response.json();
+                const response = await fetch(`/api/automators/${{automatorId}}`, {{
+                    method: 'PUT',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify(updatedAutomator)
+                }});
 
-                if (result.ok) {{
-                    statusEl.innerHTML = `<div class="alert success">✓ Loaded ${{result.count}} items</div>`;
-                    setTimeout(() => location.reload(), 1500);
+                if (response.ok) {{
+                    location.reload();
                 }} else {{
-                    statusEl.innerHTML = `<div class="alert error">✗ Failed: ${{result.message || result.error}}</div>`;
+                    const statusDiv = document.getElementById('automator-status');
+                    statusDiv.innerHTML = '<div class="alert error">Error toggling Automator</div>';
+                    setTimeout(() => statusDiv.innerHTML = '', 3000);
                 }}
             }} catch (e) {{
-                statusEl.innerHTML = `<div class="alert error">✗ Error: ${{e.message}}</div>`;
+                const statusDiv = document.getElementById('automator-status');
+                statusDiv.innerHTML = '<div class="alert error">Error toggling Automator: ' + e.message + '</div>';
+                setTimeout(() => statusDiv.innerHTML = '', 3000);
             }}
         }}
 
         async function deleteAutomator(automatorId, automatorName) {{
-            if (!confirm(`Are you sure you want to delete "${{automatorName}}"?`)) {{
-                return;
-            }}
-
             // Check for orphaned mappings first
             const checkResponse = await fetch(`/api/automators/${{automatorId}}`, {{method: 'DELETE'}});
             const checkData = await checkResponse.json();
 
             if (checkData.requires_confirmation && checkData.count > 0) {{
-                const deleteAlso = confirm(`This Automator has ${{checkData.count}} command mapping(s).\\n\\nDo you want to delete these mappings as well?\\n\\nYes = Delete mappings\\nNo = Keep mappings (they will be orphaned)`);
-
-                const confirmResponse = await fetch(`/api/automators/${{automatorId}}/delete?delete_mappings=${{deleteAlso}}`, {{method: 'POST'}});
+                // Automatically delete mappings as well
+                const confirmResponse = await fetch(`/api/automators/${{automatorId}}/delete?delete_mappings=true`, {{method: 'POST'}});
 
                 if (confirmResponse.ok) {{
                     location.reload();
                 }} else {{
-                    alert('Error deleting Automator');
+                    const statusDiv = document.getElementById('automator-status');
+                    statusDiv.innerHTML = '<div class="alert error">Error deleting Automator</div>';
+                    setTimeout(() => statusDiv.innerHTML = '', 3000);
                 }}
             }} else {{
                 // No mappings, proceed with deletion
@@ -2372,21 +2674,15 @@ async def automator_macros_page():
                 if (confirmResponse.ok) {{
                     location.reload();
                 }} else {{
-                    alert('Error deleting Automator');
+                    const statusDiv = document.getElementById('automator-status');
+                    statusDiv.innerHTML = '<div class="alert error">Error deleting Automator</div>';
+                    setTimeout(() => statusDiv.innerHTML = '', 3000);
                 }}
             }}
         }}
 
-        // Switch Automator for viewing macros
-        function switchAutomator() {{
-            // Just reload with selected Automator (could be improved with AJAX)
-            location.reload();
-        }}
-
-        // Test macro/button/shortcut with selected Automator
-        async function testMacro(macroId, macroName, itemType = 'macro') {{
-            const automatorId = document.getElementById('automatorSelector')?.value || '{selected_automator_id or ""}';
-
+        // Test macro/button/shortcut with specific Automator
+        async function testMacro(macroId, macroName, itemType = 'macro', automatorId) {{
             fetch(`/api/automator/trigger/${{macroId}}?item_type=${{itemType}}&automator_id=${{automatorId}}`, {{method: 'POST'}})
                 .then(response => {{
                     if (!response.ok) {{
@@ -2396,31 +2692,35 @@ async def automator_macros_page():
                 .catch(err => console.error(`Error triggering ${{itemType}}: ${{macroName}}`, err));
         }}
 
-        async function refreshMacros() {{
+        async function refreshAllAutomators() {{
             const status = document.getElementById('refreshStatus');
-            const btn = document.getElementById('refreshBtn');
-            const automatorId = document.getElementById('automatorSelector')?.value || '{selected_automator_id or ""}';
-
-            btn.disabled = true;
-            btn.textContent = 'Loading...';
-            status.innerHTML = '<div class="alert info">Refreshing data from Automator...</div>';
+            status.innerHTML = '<div class="alert info">Refreshing all Automators...</div>';
 
             try {{
-                const response = await fetch(`/api/automator/refresh?automator_id=${{automatorId}}`, {{method: 'POST'}});
-                const result = await response.json();
+                const response = await fetch('/api/automators');
+                const data = await response.json();
+                const automators = data.automators;
 
-                if (result.ok) {{
-                    status.innerHTML = `<div class="alert success">${{result.message}}</div>`;
+                let successCount = 0;
+                let totalCount = automators.length;
+
+                for (const auto of automators) {{
+                    const refreshResponse = await fetch(`/api/automator/refresh?automator_id=${{auto.id}}`, {{method: 'POST'}});
+                    const result = await refreshResponse.json();
+                    if (result.ok) {{
+                        successCount++;
+                    }}
+                }}
+
+                if (successCount === totalCount) {{
+                    status.innerHTML = `<div class="alert success">Successfully refreshed all ${{totalCount}} Automator(s)</div>`;
                     setTimeout(() => location.reload(), 1000);
                 }} else {{
-                    status.innerHTML = `<div class="alert error">Failed to refresh: ${{result.error || result.message}}</div>`;
-                    btn.disabled = false;
-                    btn.textContent = 'Reload Macros';
+                    status.innerHTML = `<div class="alert warning">Refreshed ${{successCount}} of ${{totalCount}} Automator(s)</div>`;
+                    setTimeout(() => location.reload(), 2000);
                 }}
             }} catch (e) {{
                 status.innerHTML = `<div class="alert error">Error: ${{e.message}}</div>`;
-                btn.disabled = false;
-                btn.textContent = 'Reload Macros';
             }}
         }}
 
@@ -2428,37 +2728,25 @@ async def automator_macros_page():
             const searchTerm = document.getElementById('searchBox').value.toLowerCase();
             const items = document.querySelectorAll('.searchable-item');
 
-            let macrosVisible = 0;
-            let buttonsVisible = 0;
-            let shortcutsVisible = 0;
-
             items.forEach(item => {{
                 const itemName = item.getAttribute('data-name');
-                const itemType = item.getAttribute('data-type');
                 const matches = itemName.includes(searchTerm);
 
                 if (matches) {{
                     item.style.display = 'flex';
-                    if (itemType === 'macros') macrosVisible++;
-                    else if (itemType === 'buttons') buttonsVisible++;
-                    else if (itemType === 'shortcuts') shortcutsVisible++;
                 }} else {{
                     item.style.display = 'none';
                 }}
             }});
 
-            const macrosCount = document.getElementById('macros-count');
-            const buttonsCount = document.getElementById('buttons-count');
-            const shortcutsCount = document.getElementById('shortcuts-count');
-
-            if (macrosCount) macrosCount.textContent = macrosVisible;
-            if (buttonsCount) buttonsCount.textContent = buttonsVisible;
-            if (shortcutsCount) shortcutsCount.textContent = shortcutsVisible;
-
+            // Auto-expand sections that have matching items when searching
             if (searchTerm) {{
-                if (macrosVisible > 0) document.getElementById('macros-section').setAttribute('open', '');
-                if (buttonsVisible > 0) document.getElementById('buttons-section').setAttribute('open', '');
-                if (shortcutsVisible > 0) document.getElementById('shortcuts-section').setAttribute('open', '');
+                document.querySelectorAll('details').forEach(detail => {{
+                    const hasVisibleItems = detail.querySelectorAll('.searchable-item[style*="display: flex"]').length > 0;
+                    if (hasVisibleItems) {{
+                        detail.setAttribute('open', '');
+                    }}
+                }});
             }}
         }}
     </script>
@@ -2496,16 +2784,16 @@ async def command_mapping_page():
         """
         return _get_base_html("Command Mapping", content, "mapping")
 
-    # Build Automator options HTML
-    automator_options_html = ""
+    # Collect all macros from all Automators
+    all_macros = []
     for auto in automators:
-        automator_options_html += f'<option value="{auto["id"]}">{auto["name"]}</option>'
-
-    # Collect all macros from all Automators (for JavaScript)
-    all_macros_by_automator = {}
-    for auto in automators:
-        macros = fetch_automator_macros(auto["id"])
-        all_macros_by_automator[auto["id"]] = macros
+        auto_id = auto["id"]
+        auto_name = auto["name"]
+        macros = fetch_automator_macros(auto_id)
+        for macro in macros:
+            macro["_automator_id"] = auto_id
+            macro["_automator_name"] = auto_name
+            all_macros.append(macro)
 
     # Build mapping table
     table_rows = ""
@@ -2523,42 +2811,41 @@ async def command_mapping_page():
 
         # Get current automator_id and macro
         current_automator_id = current_mapping.get("automator_id", "") if current_mapping else ""
+        current_automator_name = ""
+        if current_automator_id:
+            for auto in automators:
+                if auto["id"] == current_automator_id:
+                    current_automator_name = auto["name"]
+                    break
+
         current_macro_id = current_mapping.get("automator_macro_id", "") if current_mapping else ""
         current_macro_name = current_mapping.get("automator_macro_name", "") if current_mapping else ""
         current_item_type = current_mapping.get("item_type", "macro") if current_mapping else "macro"
 
-        # Build current display value
-        type_label = f" [{current_item_type}]" if current_item_type and current_macro_name else ""
-        current_value = f"{current_macro_name}{type_label}" if current_macro_name else ""
+        # Build current display value with automator name
+        if current_macro_name and current_automator_name:
+            type_label = f" [{current_item_type}]" if current_item_type else ""
+            current_value = f"{current_automator_name}: {current_macro_name}{type_label}"
+        else:
+            current_value = ""
 
-        # Build datalist for this TCP command (will be dynamically updated by JavaScript)
+        # Build datalist with ALL macros from ALL Automators
         options_html = ""
-        if current_automator_id:
-            macros = all_macros_by_automator.get(current_automator_id, [])
-            for macro in macros:
-                macro_id = macro.get("id", "")
-                macro_name = macro.get("title", macro.get("name", "Unknown"))
-                macro_type = macro.get("type", "")
-                type_label_opt = f" [{macro_type}]" if macro_type else ""
-                display_text = f"{macro_name}{type_label_opt}"
-                options_html += f'<option value="{display_text}" data-id="{macro_id}" data-type="{macro_type}">'
-
-        # Build Automator selector with current value
-        automator_select_html = f'<select class="automator-select" data-tcp-id="{tcp_id}" onchange="automatorChanged(\'{tcp_id}\')" style="width: 100%; padding: 8px; margin-bottom: 8px;">'
-        if not current_automator_id:
-            automator_select_html += '<option value="">-- Select Automator --</option>'
-        for auto in automators:
-            selected = 'selected' if auto["id"] == current_automator_id else ''
-            automator_select_html += f'<option value="{auto["id"]}" {selected}>{auto["name"]}</option>'
-        automator_select_html += '</select>'
+        for macro in all_macros:
+            macro_id = macro.get("id", "")
+            macro_name = macro.get("title", macro.get("name", "Unknown"))
+            macro_type = macro.get("type", "")
+            auto_name = macro.get("_automator_name", "")
+            type_label_opt = f" [{macro_type}]" if macro_type else ""
+            display_text = f"{auto_name}: {macro_name}{type_label_opt}"
+            options_html += f'<option value="{display_text}" data-automator-id="{macro.get("_automator_id", "")}" data-id="{macro_id}" data-type="{macro_type}">'
 
         table_rows += f"""
         <tr class="searchable-mapping-row" data-tcp-name="{tcp_name.lower()}" data-tcp-trigger="{tcp_trigger.lower()}" data-automator-name="{current_value.lower()}">
             <td><strong>{tcp_name}</strong><br><span style="color: #888888; font-size: 12px;">{tcp_trigger}</span></td>
             <td>
-                {automator_select_html}
                 <input list="macros-{tcp_id}" class="mapping-input" data-tcp-id="{tcp_id}" value="{current_value}"
-                       placeholder="Select Automator first, then type to search..." style="width: 100%; padding: 8px;" onchange="saveMapping('{tcp_id}')">
+                       placeholder="Type to search all Automator items..." style="width: 100%; padding: 8px;" onchange="saveMapping('{tcp_id}')">
                 <datalist id="macros-{tcp_id}">
                     {options_html}
                 </datalist>
@@ -2601,50 +2888,13 @@ async def command_mapping_page():
     <div id="mappingStatus" class="mt-20"></div>
 
     <script>
-        // All macros organized by Automator ID
-        const macrosByAutomator = {json.dumps(all_macros_by_automator)};
-
-        // Handle Automator selection change
-        function automatorChanged(tcpId) {{
-            const automatorSelect = document.querySelector(`select.automator-select[data-tcp-id="${{tcpId}}"]`);
-            const automatorId = automatorSelect.value;
-            const input = document.querySelector(`input.mapping-input[data-tcp-id="${{tcpId}}"]`);
-            const datalist = document.getElementById(`macros-${{tcpId}}`);
-
-            // Clear current macro selection
-            input.value = '';
-
-            // Rebuild datalist options for selected Automator
-            datalist.innerHTML = '';
-            if (automatorId && macrosByAutomator[automatorId]) {{
-                const macros = macrosByAutomator[automatorId];
-                macros.forEach(macro => {{
-                    const macroName = macro.title || macro.name || 'Unknown';
-                    const macroType = macro.type || '';
-                    const typeLabel = macroType ? ` [${{macroType}}]` : '';
-                    const displayText = macroName + typeLabel;
-
-                    const option = document.createElement('option');
-                    option.value = displayText;
-                    option.setAttribute('data-id', macro.id);
-                    option.setAttribute('data-type', macroType);
-                    datalist.appendChild(option);
-                }});
-            }}
-        }}
+        // All macros from all Automators
+        const allMacros = {json.dumps(all_macros)};
 
         async function saveMapping(tcpId) {{
-            const automatorSelect = document.querySelector(`select.automator-select[data-tcp-id="${{tcpId}}"]`);
-            const automatorId = automatorSelect.value;
             const input = document.querySelector(`input[data-tcp-id="${{tcpId}}"]`);
             const displayValue = input.value.trim();
             const status = document.getElementById('mappingStatus');
-
-            if (!automatorId) {{
-                status.innerHTML = '<div class="alert error">Please select an Automator first</div>';
-                setTimeout(() => status.innerHTML = '', 3000);
-                return;
-            }}
 
             if (!displayValue) {{
                 // Remove mapping
@@ -2654,19 +2904,23 @@ async def command_mapping_page():
                 return;
             }}
 
-            // Find the macro by matching the display text in the selected Automator
-            const macros = macrosByAutomator[automatorId] || [];
-            const macro = macros.find(m => {{
-                const type_label = m.type ? ` [${{m.type}}]` : '';
-                return ((m.title || m.name || '') + type_label) === displayValue;
+            // Find the macro by matching the display text
+            const macro = allMacros.find(m => {{
+                const macroName = m.title || m.name || '';
+                const macroType = m.type || '';
+                const autoName = m._automator_name || '';
+                const type_label = macroType ? ` [${{macroType}}]` : '';
+                const fullDisplay = `${{autoName}}: ${{macroName}}${{type_label}}`;
+                return fullDisplay === displayValue;
             }});
 
             if (!macro) {{
-                status.innerHTML = '<div class="alert error">Please select a valid macro from the list</div>';
+                status.innerHTML = '<div class="alert error">Please select a valid item from the list</div>';
                 setTimeout(() => status.innerHTML = '', 3000);
                 return;
             }}
 
+            const automatorId = macro._automator_id;
             const macroId = macro.id;
             const macroName = macro.title || macro.name || '';
             const macroType = macro.type || 'macro';
@@ -2677,36 +2931,34 @@ async def command_mapping_page():
         }}
 
         async function testMapping(tcpId) {{
-            const automatorSelect = document.querySelector(`select.automator-select[data-tcp-id="${{tcpId}}"]`);
-            const automatorId = automatorSelect.value;
             const input = document.querySelector(`input[data-tcp-id="${{tcpId}}"]`);
             const displayValue = input.value.trim();
-            const status = document.getElementById('mappingStatus');
-
-            if (!automatorId) {{
-                status.innerHTML = '<div class="alert error">Please select an Automator first</div>';
-                setTimeout(() => status.innerHTML = '', 3000);
-                return;
-            }}
 
             if (!displayValue) {{
+                const status = document.getElementById('mappingStatus');
                 status.innerHTML = '<div class="alert error">No mapping configured for this command</div>';
                 setTimeout(() => status.innerHTML = '', 3000);
                 return;
             }}
 
-            // Find the macro by matching the display text
-            const macros = macrosByAutomator[automatorId] || [];
-            const macro = macros.find(m => {{
-                const type_label = m.type ? ` [${{m.type}}]` : '';
-                return ((m.title || m.name || '') + type_label) === displayValue;
+            // Find the macro and automator
+            const macro = allMacros.find(m => {{
+                const macroName = m.title || m.name || '';
+                const macroType = m.type || '';
+                const autoName = m._automator_name || '';
+                const type_label = macroType ? ` [${{macroType}}]` : '';
+                const fullDisplay = `${{autoName}}: ${{macroName}}${{type_label}}`;
+                return fullDisplay === displayValue;
             }});
 
             if (!macro) {{
-                status.innerHTML = '<div class="alert error">Invalid mapping - please select from the list</div>';
+                const status = document.getElementById('mappingStatus');
+                status.innerHTML = '<div class="alert error">Invalid mapping</div>';
                 setTimeout(() => status.innerHTML = '', 3000);
                 return;
             }}
+
+            const automatorId = macro._automator_id;
 
             // Trigger the macro with automator_id
             status.innerHTML = '<div class="alert info">Testing mapping...</div>';
@@ -2885,6 +3137,13 @@ async def settings_page():
     parts.append('<pre id="import-output"></pre>')
     parts.append("</fieldset>")
 
+    # Tutorial section
+    parts.append("<fieldset><legend>Tutorial</legend>")
+    parts.append("<p>Reset the welcome guide that appears on the home page for first-time setup.</p>")
+    parts.append('<button type="button" onclick="resetTutorial()">Reset Welcome Guide</button>')
+    parts.append('<span id="tutorial-status" style="margin-left: 12px; color: #888;"></span>')
+    parts.append("</fieldset>")
+
     # Updates section
     parts.append("<fieldset><legend>Updates</legend>")
     parts.append(f"<p>Current version: <code>{__version__}</code></p>")
@@ -2960,6 +3219,22 @@ async def settings_page():
     parts.append("    setTimeout(() => location.reload(), 2000);")
     parts.append("  } catch (e) {")
     parts.append('    document.getElementById("import-output").textContent = "Import failed: " + e;')
+    parts.append("  }")
+    parts.append("}")
+    parts.append("async function resetTutorial() {")
+    parts.append('  const status = document.getElementById("tutorial-status");')
+    parts.append('  status.textContent = "Resetting...";')
+    parts.append("  try {")
+    parts.append('    await postJSON("/settings", { first_run: true });')
+    parts.append('    status.textContent = "✓ Welcome guide will appear on next visit to home page";')
+    parts.append('    status.style.color = "#4caf50";')
+    parts.append("    setTimeout(() => {")
+    parts.append('      status.textContent = "";')
+    parts.append('      status.style.color = "#888";')
+    parts.append("    }, 5000);")
+    parts.append("  } catch (e) {")
+    parts.append('    status.textContent = "Failed to reset: " + e;')
+    parts.append('    status.style.color = "#f44336";')
     parts.append("  }")
     parts.append("}")
     parts.append("checkUpdates();")
@@ -3285,6 +3560,9 @@ async def update_settings(settings: SettingsIn):
     if settings.theme is not None:
         config_data["theme"] = settings.theme
         log_event("CONFIG", f"Theme changed to {settings.theme}")
+    if settings.first_run is not None:
+        config_data["first_run"] = settings.first_run
+        log_event("CONFIG", f"First run status set to {settings.first_run}")
 
     save_config(config_data)
 
